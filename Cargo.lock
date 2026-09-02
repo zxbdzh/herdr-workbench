@@ -517,6 +517,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "herdr-workbench-server"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "herdr-workbench-transport",
+ "tokio",
+]
+
+[[package]]
 name = "herdr-workbench-transport"
 version = "0.1.0"
 dependencies = [
