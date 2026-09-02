@@ -7,7 +7,7 @@ async fn main() {
         .await
         .expect("bind workbench localhost port");
     println!("herdr-workbench listening on http://{address}");
-    axum::serve(listener, herdr_workbench_transport::router())
+    axum::serve(listener, herdr_workbench_transport::empty_router())
         .await
         .expect("serve workbench HTTP API");
 }

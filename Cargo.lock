@@ -529,6 +529,7 @@ dependencies = [
 name = "herdr-workbench-transport"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "herdr-workbench-app-core",
  "herdr-workbench-domain",

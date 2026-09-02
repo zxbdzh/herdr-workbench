@@ -14,6 +14,8 @@ pub trait WorkspaceRepository: Send + Sync {
         id: &HerdrWorkspaceId,
     ) -> Result<Option<Workspace>, RepositoryError>;
 
+    async fn list(&self) -> Result<Vec<Workspace>, RepositoryError>;
+
     async fn insert(&self, workspace: Workspace) -> Result<(), RepositoryError>;
 
     async fn increment_revision(
@@ -178,6 +180,10 @@ impl WorkspaceRepository for InMemoryWorkspaceRepository {
         id: &HerdrWorkspaceId,
     ) -> Result<Option<Workspace>, RepositoryError> {
         Ok(self.workspaces.read().await.get(id).cloned())
+    }
+
+    async fn list(&self) -> Result<Vec<Workspace>, RepositoryError> {
+        Ok(self.workspaces.read().await.values().cloned().collect())
     }
 
     async fn insert(&self, workspace: Workspace) -> Result<(), RepositoryError> {

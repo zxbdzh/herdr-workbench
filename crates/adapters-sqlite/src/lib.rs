@@ -56,6 +56,21 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
             .map_err(|error| RepositoryError::new(error.to_string()))
     }
 
+    async fn list(&self) -> Result<Vec<Workspace>, RepositoryError> {
+        let rows = sqlx::query_as::<_, WorkspaceRow>(
+            "SELECT workspace_id, herdr_workspace_id, label, cwd, revision
+             FROM workspaces ORDER BY created_at, workspace_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| RepositoryError::new(error.to_string()))?;
+
+        rows.into_iter()
+            .map(WorkspaceRow::try_into_workspace)
+            .map(|result| result.map_err(|error| RepositoryError::new(error.to_string())))
+            .collect()
+    }
+
     async fn insert(&self, workspace: Workspace) -> Result<(), RepositoryError> {
         sqlx::query(
             "INSERT INTO workspaces
