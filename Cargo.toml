@@ -2,6 +2,7 @@
 members = [
   "crates/domain",
   "crates/app-core",
+  "crates/adapters-sqlite",
 ]
 resolver = "2"
 
