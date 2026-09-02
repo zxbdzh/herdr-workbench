@@ -1,7 +1,9 @@
 use std::path::{Component, Path, PathBuf};
 
+pub mod events;
 pub mod preview;
 
+pub use events::{AppEvent, EventPayload, EventType, PreviewOpened};
 pub use preview::{PreviewSession, PreviewSessionId, PreviewStatus};
 
 use serde::{Deserialize, Serialize};

@@ -1,0 +1,9 @@
+/target/
+
+# Node / frontend
+node_modules/
+dist/
+
+# Local application data
+.env
+.env.*

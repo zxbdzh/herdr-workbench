@@ -1,9 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
-use herdr_workbench_domain::{DomainError, HerdrWorkspaceId, PreviewSession, Workspace};
+use herdr_workbench_domain::{AppEvent, DomainError, HerdrWorkspaceId, PreviewSession, Workspace};
 use thiserror::Error;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
 
 pub use herdr_workbench_domain::HerdrWorkspaceContext;
 
@@ -15,6 +15,11 @@ pub trait WorkspaceRepository: Send + Sync {
     ) -> Result<Option<Workspace>, RepositoryError>;
 
     async fn insert(&self, workspace: Workspace) -> Result<(), RepositoryError>;
+
+    async fn increment_revision(
+        &self,
+        workspace_id: &herdr_workbench_domain::WorkbenchWorkspaceId,
+    ) -> Result<u64, RepositoryError>;
 }
 
 pub struct BindWorkspace<'a, R> {
@@ -71,25 +76,46 @@ pub trait EventPublisher: Send + Sync {
     async fn publish(&self, event: AppEvent);
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AppEvent {
-    PreviewOpened(PreviewSession),
+#[derive(Clone)]
+pub struct EventBus {
+    sender: broadcast::Sender<AppEvent>,
 }
 
-pub struct OpenPreview<'a, R, P, E> {
+impl EventBus {
+    pub fn new(capacity: usize) -> Self {
+        let (sender, _) = broadcast::channel(capacity);
+        Self { sender }
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<AppEvent> {
+        self.sender.subscribe()
+    }
+}
+
+#[async_trait]
+impl EventPublisher for EventBus {
+    async fn publish(&self, event: AppEvent) {
+        let _ = self.sender.send(event);
+    }
+}
+
+pub struct OpenPreview<'a, W, R, P, E> {
+    workspaces: &'a W,
     previews: &'a R,
     adapter: &'a P,
     events: &'a E,
 }
 
-impl<'a, R, P, E> OpenPreview<'a, R, P, E>
+impl<'a, W, R, P, E> OpenPreview<'a, W, R, P, E>
 where
+    W: WorkspaceRepository,
     R: PreviewRepository,
     P: PreviewAdapter,
     E: EventPublisher,
 {
-    pub fn new(previews: &'a R, adapter: &'a P, events: &'a E) -> Self {
+    pub fn new(workspaces: &'a W, previews: &'a R, adapter: &'a P, events: &'a E) -> Self {
         Self {
+            workspaces,
             previews,
             adapter,
             events,
@@ -110,9 +136,13 @@ where
         }
 
         let session = self.adapter.open(workspace, url).await?;
+        let revision = self
+            .workspaces
+            .increment_revision(&workspace.workspace_id)
+            .await?;
         self.previews.insert(session.clone()).await?;
         self.events
-            .publish(AppEvent::PreviewOpened(session.clone()))
+            .publish(AppEvent::preview_opened(session.clone(), revision))
             .await;
         Ok(session)
     }
@@ -126,6 +156,18 @@ pub struct InMemoryWorkspaceRepository {
 impl InMemoryWorkspaceRepository {
     pub async fn workspace_count(&self) -> usize {
         self.workspaces.read().await.len()
+    }
+
+    pub async fn revision(
+        &self,
+        workspace_id: &herdr_workbench_domain::WorkbenchWorkspaceId,
+    ) -> u64 {
+        self.workspaces
+            .read()
+            .await
+            .values()
+            .find(|workspace| &workspace.workspace_id == workspace_id)
+            .map_or(0, |workspace| workspace.revision)
     }
 }
 
@@ -145,6 +187,19 @@ impl WorkspaceRepository for InMemoryWorkspaceRepository {
             .entry(workspace.herdr_workspace_id.clone())
             .or_insert(workspace);
         Ok(())
+    }
+
+    async fn increment_revision(
+        &self,
+        workspace_id: &herdr_workbench_domain::WorkbenchWorkspaceId,
+    ) -> Result<u64, RepositoryError> {
+        let mut workspaces = self.workspaces.write().await;
+        let workspace = workspaces
+            .values_mut()
+            .find(|workspace| &workspace.workspace_id == workspace_id)
+            .ok_or_else(|| RepositoryError::new("workspace not found"))?;
+        workspace.revision += 1;
+        Ok(workspace.revision)
     }
 }
 
@@ -221,11 +276,11 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        AppEvent, BindWorkspace, EventPublisher, HerdrWorkspaceContext, InMemoryPreviewRepository,
+        BindWorkspace, EventBus, HerdrWorkspaceContext, InMemoryPreviewRepository,
         InMemoryWorkspaceRepository, OpenPreview, PreviewAdapter, PreviewError,
     };
     use async_trait::async_trait;
-    use herdr_workbench_domain::{PreviewSession, PreviewStatus};
+    use herdr_workbench_domain::{EventPayload, EventType, PreviewSession};
 
     struct FakePreviewAdapter;
 
@@ -240,20 +295,8 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct RecordingEventBus {
-        events: tokio::sync::Mutex<Vec<AppEvent>>,
-    }
-
-    #[async_trait]
-    impl EventPublisher for RecordingEventBus {
-        async fn publish(&self, event: AppEvent) {
-            self.events.lock().await.push(event);
-        }
-    }
-
     #[tokio::test]
-    async fn opening_preview_persists_an_open_session_and_publishes_event() {
+    async fn opening_preview_publishes_a_typed_event_with_the_new_revision() {
         let workspaces = InMemoryWorkspaceRepository::default();
         let workspace = BindWorkspace::new(&workspaces)
             .execute(
@@ -267,21 +310,21 @@ mod tests {
             .await
             .unwrap();
         let previews = InMemoryPreviewRepository::default();
-        let events = RecordingEventBus::default();
-        let use_case = OpenPreview::new(&previews, &FakePreviewAdapter, &events);
+        let events = EventBus::new(16);
+        let mut receiver = events.subscribe();
+        let use_case = OpenPreview::new(&workspaces, &previews, &FakePreviewAdapter, &events);
 
-        let session = use_case
+        use_case
             .execute(&workspace, Some("http://localhost:3000".into()))
             .await
             .unwrap();
 
-        assert_eq!(session.status, PreviewStatus::Open);
-        assert_eq!(session.workspace_id, workspace.workspace_id);
-        assert_eq!(previews.session_count().await, 1);
-        assert!(matches!(
-            events.events.lock().await.as_slice(),
-            [AppEvent::PreviewOpened(_)]
-        ));
+        let event = receiver.recv().await.unwrap();
+        assert_eq!(event.event_type, EventType::PreviewOpened);
+        assert_eq!(event.workspace_id, workspace.workspace_id);
+        assert_eq!(event.revision, 1);
+        assert!(matches!(event.payload, EventPayload::PreviewOpened(_)));
+        assert_eq!(workspaces.revision(&workspace.workspace_id).await, 1);
     }
 
     #[tokio::test]
@@ -299,8 +342,9 @@ mod tests {
             .await
             .unwrap();
         let previews = InMemoryPreviewRepository::default();
-        let events = RecordingEventBus::default();
-        let use_case = OpenPreview::new(&previews, &FakePreviewAdapter, &events);
+        let events = EventBus::new(16);
+        let mut receiver = events.subscribe();
+        let use_case = OpenPreview::new(&workspaces, &previews, &FakePreviewAdapter, &events);
 
         let first = use_case.execute(&workspace, None).await.unwrap();
         let second = use_case
@@ -310,7 +354,9 @@ mod tests {
 
         assert_eq!(first.session_id, second.session_id);
         assert_eq!(previews.session_count().await, 1);
-        assert_eq!(events.events.lock().await.len(), 1);
+        assert_eq!(workspaces.revision(&workspace.workspace_id).await, 1);
+        assert!(receiver.try_recv().is_ok());
+        assert!(receiver.try_recv().is_err());
     }
 
     #[tokio::test]
