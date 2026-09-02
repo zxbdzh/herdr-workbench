@@ -5,7 +5,10 @@ use herdr_workbench_app_core::{RepositoryError, WorkspaceRepository};
 use herdr_workbench_domain::{
     HerdrWorkspaceContext, HerdrWorkspaceId, WorkbenchWorkspaceId, Workspace,
 };
-use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
+use sqlx::{
+    SqlitePool,
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+};
 
 #[derive(Clone)]
 pub struct SqliteWorkspaceRepository {
@@ -14,9 +17,12 @@ pub struct SqliteWorkspaceRepository {
 
 impl SqliteWorkspaceRepository {
     pub async fn connect(database_url: &str) -> Result<Self, sqlx::Error> {
+        let options: SqliteConnectOptions = database_url
+            .parse::<SqliteConnectOptions>()?
+            .create_if_missing(true);
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
-            .connect(database_url)
+            .connect_with(options)
             .await?;
         sqlx::query("PRAGMA journal_mode = WAL")
             .execute(&pool)

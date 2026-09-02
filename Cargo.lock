@@ -530,6 +530,7 @@ name = "herdr-workbench-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "herdr-workbench-adapters-sqlite",
  "herdr-workbench-transport",
  "tokio",
 ]
