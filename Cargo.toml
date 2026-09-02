@@ -3,6 +3,7 @@ members = [
   "crates/domain",
   "crates/app-core",
   "crates/adapters-sqlite",
+  "crates/transport",
 ]
 resolver = "2"
 
