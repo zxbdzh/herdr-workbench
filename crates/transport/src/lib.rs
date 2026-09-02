@@ -2,14 +2,21 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
+    body::Body,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderValue, StatusCode, header::CONTENT_TYPE},
+    response::{IntoResponse, Response},
     routing::get,
 };
 use herdr_workbench_app_core::WorkspaceRepository;
 use herdr_workbench_contracts::{ApiDoc, WorkspaceDto};
+use rust_embed::RustEmbed;
 use serde::Serialize;
 use utoipa::OpenApi;
+
+#[derive(RustEmbed)]
+#[folder = "../../web/dist/"]
+struct WebAssets;
 
 pub struct AppState<R> {
     pub workspaces: Arc<R>,
@@ -35,6 +42,9 @@ where
     Router::new()
         .route("/api/v1/health", get(health))
         .route("/api/v1/openapi.json", get(openapi))
+        .route("/app", get(web_index))
+        .route("/app/", get(web_index))
+        .route("/app/{*path}", get(web_asset))
         .route("/api/v1/workspaces", get(workspaces::<R>))
         .route("/api/v1/workspaces/{id}/state", get(workspace_state))
         .with_state(state)
@@ -52,6 +62,35 @@ async fn openapi() -> Json<utoipa::openapi::OpenApi> {
     Json(ApiDoc::openapi())
 }
 
+async fn web_index() -> Response {
+    web_asset(Path(String::from("index.html"))).await
+}
+
+async fn web_asset(Path(path): Path<String>) -> Response {
+    let path = path.trim_start_matches('/');
+    let asset = WebAssets::get(path).or_else(|| WebAssets::get("index.html"));
+    let Some(asset) = asset else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    let content_type = match path.rsplit('.').next().unwrap_or_default() {
+        "css" => "text/css; charset=utf-8",
+        "js" => "text/javascript; charset=utf-8",
+        "html" => "text/html; charset=utf-8",
+        "json" => "application/json",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "ico" => "image/x-icon",
+        _ => "application/octet-stream",
+    };
+
+    let mut response = Response::new(Body::from(asset.data.into_owned()));
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response
+}
 #[derive(Serialize)]
 struct WorkspaceListResponseDto {
     workspaces: Vec<WorkspaceDto>,
@@ -160,6 +199,20 @@ mod tests {
     use herdr_workbench_app_core::{BindWorkspace, InMemoryWorkspaceRepository};
     use herdr_workbench_domain::HerdrWorkspaceContext;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn app_route_serves_the_embedded_react_page() {
+        let response = empty_router()
+            .oneshot(Request::builder().uri("/app/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "text/html; charset=utf-8"
+        );
+    }
 
     #[tokio::test]
     async fn health_endpoint_reports_ready() {

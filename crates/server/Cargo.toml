@@ -10,4 +10,5 @@ rust-version.workspace = true
 axum = "0.8"
 herdr-workbench-adapters-sqlite = { path = "../adapters-sqlite" }
 herdr-workbench-transport = { path = "../transport" }
+rust-embed = "8"
 tokio.workspace = true

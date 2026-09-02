@@ -1,0 +1,12 @@
+{
+  "name": "herdr-workbench",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "web:dev": "pnpm --dir web dev",
+    "web:typecheck": "pnpm --dir web typecheck",
+    "web:build": "pnpm --dir web build",
+    "rust:test": "cargo test --workspace",
+    "build": "pnpm web:build && cargo build --workspace"
+  }
+}
