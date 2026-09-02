@@ -22,17 +22,17 @@ jobs:
         with:
           components: rustfmt
 
+      - name: Enable pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.0
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
-
-      - name: Enable pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10.15.0
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
