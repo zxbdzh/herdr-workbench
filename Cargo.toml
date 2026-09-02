@@ -5,6 +5,7 @@ members = [
   "crates/adapters-sqlite",
   "crates/transport",
   "crates/server",
+  "crates/contracts",
 ]
 resolver = "2"
 

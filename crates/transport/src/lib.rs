@@ -7,7 +7,9 @@ use axum::{
     routing::get,
 };
 use herdr_workbench_app_core::WorkspaceRepository;
+use herdr_workbench_contracts::{ApiDoc, WorkspaceDto};
 use serde::Serialize;
+use utoipa::OpenApi;
 
 pub struct AppState<R> {
     pub workspaces: Arc<R>,
@@ -32,6 +34,7 @@ where
 {
     Router::new()
         .route("/api/v1/health", get(health))
+        .route("/api/v1/openapi.json", get(openapi))
         .route("/api/v1/workspaces", get(workspaces::<R>))
         .route("/api/v1/workspaces/{id}/state", get(workspace_state))
         .with_state(state)
@@ -45,14 +48,28 @@ async fn health() -> (StatusCode, Json<serde_json::Value>) {
     (StatusCode::OK, Json(serde_json::json!({"status": "ready"})))
 }
 
+async fn openapi() -> Json<utoipa::openapi::OpenApi> {
+    Json(ApiDoc::openapi())
+}
+
 #[derive(Serialize)]
-struct WorkspaceListResponse {
-    workspaces: Vec<herdr_workbench_domain::Workspace>,
+struct WorkspaceListResponseDto {
+    workspaces: Vec<WorkspaceDto>,
+}
+
+fn workspace_to_dto(workspace: herdr_workbench_domain::Workspace) -> WorkspaceDto {
+    WorkspaceDto {
+        workspace_id: workspace.workspace_id.as_uuid().to_string(),
+        herdr_workspace_id: workspace.herdr_workspace_id.as_str().to_owned(),
+        label: workspace.label,
+        cwd: workspace.cwd.to_string_lossy().into_owned(),
+        revision: workspace.revision,
+    }
 }
 
 async fn workspaces<R>(
     State(state): State<AppState<R>>,
-) -> Result<Json<WorkspaceListResponse>, ApiError>
+) -> Result<Json<WorkspaceListResponseDto>, ApiError>
 where
     R: WorkspaceRepository + 'static,
 {
@@ -60,7 +77,11 @@ where
         .workspaces
         .list()
         .await
-        .map(|workspaces| Json(WorkspaceListResponse { workspaces }))
+        .map(|items| {
+            Json(WorkspaceListResponseDto {
+                workspaces: items.into_iter().map(workspace_to_dto).collect(),
+            })
+        })
         .map_err(ApiError::from)
 }
 
