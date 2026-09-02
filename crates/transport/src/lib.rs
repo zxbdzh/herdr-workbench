@@ -1,4 +1,4 @@
-use axum::{Json, Router, http::StatusCode, routing::get};
+use axum::{Router, http::StatusCode, routing::get};
 
 #[derive(Clone)]
 pub struct AppState;
