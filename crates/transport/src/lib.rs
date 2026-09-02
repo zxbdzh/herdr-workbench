@@ -9,9 +9,8 @@ use axum::{
     routing::get,
 };
 use herdr_workbench_app_core::WorkspaceRepository;
-use herdr_workbench_contracts::{ApiDoc, WorkspaceDto};
+use herdr_workbench_contracts::{ApiDoc, WorkspaceDto, WorkspaceListResponse};
 use rust_embed::RustEmbed;
-use serde::Serialize;
 use utoipa::OpenApi;
 
 #[derive(RustEmbed)]
@@ -91,24 +90,9 @@ async fn web_asset(Path(path): Path<String>) -> Response {
         .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
     response
 }
-#[derive(Serialize)]
-struct WorkspaceListResponseDto {
-    workspaces: Vec<WorkspaceDto>,
-}
-
-fn workspace_to_dto(workspace: herdr_workbench_domain::Workspace) -> WorkspaceDto {
-    WorkspaceDto {
-        workspace_id: workspace.workspace_id.as_uuid().to_string(),
-        herdr_workspace_id: workspace.herdr_workspace_id.as_str().to_owned(),
-        label: workspace.label,
-        cwd: workspace.cwd.to_string_lossy().into_owned(),
-        revision: workspace.revision,
-    }
-}
-
 async fn workspaces<R>(
     State(state): State<AppState<R>>,
-) -> Result<Json<WorkspaceListResponseDto>, ApiError>
+) -> Result<Json<WorkspaceListResponse>, ApiError>
 where
     R: WorkspaceRepository + 'static,
 {
@@ -117,8 +101,8 @@ where
         .list()
         .await
         .map(|items| {
-            Json(WorkspaceListResponseDto {
-                workspaces: items.into_iter().map(workspace_to_dto).collect(),
+            Json(WorkspaceListResponse {
+                workspaces: items.into_iter().map(WorkspaceDto::from).collect(),
             })
         })
         .map_err(ApiError::from)

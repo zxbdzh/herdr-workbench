@@ -15,6 +15,18 @@ pub struct WorkspaceDto {
     pub revision: u64,
 }
 
+impl From<herdr_workbench_domain::Workspace> for WorkspaceDto {
+    fn from(workspace: herdr_workbench_domain::Workspace) -> Self {
+        Self {
+            workspace_id: workspace.workspace_id.as_uuid().to_string(),
+            herdr_workspace_id: workspace.herdr_workspace_id.as_str().to_owned(),
+            label: workspace.label,
+            cwd: workspace.cwd.to_string_lossy().into_owned(),
+            revision: workspace.revision,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct WorkspaceListResponse {
     pub workspaces: Vec<WorkspaceDto>,
