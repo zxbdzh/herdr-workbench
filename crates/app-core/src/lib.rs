@@ -1,7 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
-use herdr_workbench_domain::{AppEvent, DomainError, HerdrWorkspaceId, PreviewSession, Workspace};
+use herdr_workbench_domain::{
+    AppEvent, DomainError, HerdrWorkspaceId, PreviewSession, WorkbenchWorkspaceId, Workspace,
+};
 use thiserror::Error;
 use tokio::sync::{RwLock, broadcast};
 
@@ -14,14 +16,14 @@ pub trait WorkspaceRepository: Send + Sync {
         id: &HerdrWorkspaceId,
     ) -> Result<Option<Workspace>, RepositoryError>;
 
+    async fn find_by_id(
+        &self,
+        id: &WorkbenchWorkspaceId,
+    ) -> Result<Option<Workspace>, RepositoryError>;
+
     async fn list(&self) -> Result<Vec<Workspace>, RepositoryError>;
 
     async fn insert(&self, workspace: Workspace) -> Result<(), RepositoryError>;
-
-    async fn increment_revision(
-        &self,
-        workspace_id: &herdr_workbench_domain::WorkbenchWorkspaceId,
-    ) -> Result<u64, RepositoryError>;
 }
 
 pub struct BindWorkspace<'a, R> {
@@ -55,22 +57,32 @@ where
 }
 
 #[async_trait]
-pub trait PreviewRepository: Send + Sync {
-    async fn find_by_workspace(
-        &self,
-        workspace_id: &herdr_workbench_domain::WorkbenchWorkspaceId,
-    ) -> Result<Option<PreviewSession>, RepositoryError>;
-
-    async fn insert(&self, session: PreviewSession) -> Result<(), RepositoryError>;
-}
-
-#[async_trait]
 pub trait PreviewAdapter: Send + Sync {
     async fn open(
         &self,
         workspace: &Workspace,
         url: Option<String>,
     ) -> Result<PreviewSession, PreviewError>;
+}
+
+#[async_trait]
+pub trait PreviewTransactionRepository: Send + Sync {
+    async fn find_by_workspace(
+        &self,
+        workspace_id: &WorkbenchWorkspaceId,
+    ) -> Result<Option<PreviewSession>, RepositoryError>;
+
+    async fn commit_preview_open(
+        &self,
+        workspace_id: &WorkbenchWorkspaceId,
+        session: PreviewSession,
+    ) -> Result<DurablePreviewCommit, RepositoryError>;
+}
+
+#[derive(Clone, Debug)]
+pub struct DurablePreviewCommit {
+    pub session: PreviewSession,
+    pub event: AppEvent,
 }
 
 #[async_trait]
@@ -101,23 +113,20 @@ impl EventPublisher for EventBus {
     }
 }
 
-pub struct OpenPreview<'a, W, R, P, E> {
-    workspaces: &'a W,
+pub struct OpenPreview<'a, R, P, E> {
     previews: &'a R,
     adapter: &'a P,
     events: &'a E,
 }
 
-impl<'a, W, R, P, E> OpenPreview<'a, W, R, P, E>
+impl<'a, R, P, E> OpenPreview<'a, R, P, E>
 where
-    W: WorkspaceRepository,
-    R: PreviewRepository,
+    R: PreviewTransactionRepository,
     P: PreviewAdapter,
     E: EventPublisher,
 {
-    pub fn new(workspaces: &'a W, previews: &'a R, adapter: &'a P, events: &'a E) -> Self {
+    pub fn new(previews: &'a R, adapter: &'a P, events: &'a E) -> Self {
         Self {
-            workspaces,
             previews,
             adapter,
             events,
@@ -138,15 +147,12 @@ where
         }
 
         let session = self.adapter.open(workspace, url).await?;
-        let revision = self
-            .workspaces
-            .increment_revision(&workspace.workspace_id)
+        let commit = self
+            .previews
+            .commit_preview_open(&workspace.workspace_id, session)
             .await?;
-        self.previews.insert(session.clone()).await?;
-        self.events
-            .publish(AppEvent::preview_opened(session.clone(), revision))
-            .await;
-        Ok(session)
+        self.events.publish(commit.event).await;
+        Ok(commit.session)
     }
 }
 
@@ -159,18 +165,6 @@ impl InMemoryWorkspaceRepository {
     pub async fn workspace_count(&self) -> usize {
         self.workspaces.read().await.len()
     }
-
-    pub async fn revision(
-        &self,
-        workspace_id: &herdr_workbench_domain::WorkbenchWorkspaceId,
-    ) -> u64 {
-        self.workspaces
-            .read()
-            .await
-            .values()
-            .find(|workspace| &workspace.workspace_id == workspace_id)
-            .map_or(0, |workspace| workspace.revision)
-    }
 }
 
 #[async_trait]
@@ -180,6 +174,19 @@ impl WorkspaceRepository for InMemoryWorkspaceRepository {
         id: &HerdrWorkspaceId,
     ) -> Result<Option<Workspace>, RepositoryError> {
         Ok(self.workspaces.read().await.get(id).cloned())
+    }
+
+    async fn find_by_id(
+        &self,
+        id: &WorkbenchWorkspaceId,
+    ) -> Result<Option<Workspace>, RepositoryError> {
+        Ok(self
+            .workspaces
+            .read()
+            .await
+            .values()
+            .find(|workspace| &workspace.workspace_id == id)
+            .cloned())
     }
 
     async fn list(&self) -> Result<Vec<Workspace>, RepositoryError> {
@@ -194,48 +201,57 @@ impl WorkspaceRepository for InMemoryWorkspaceRepository {
             .or_insert(workspace);
         Ok(())
     }
-
-    async fn increment_revision(
-        &self,
-        workspace_id: &herdr_workbench_domain::WorkbenchWorkspaceId,
-    ) -> Result<u64, RepositoryError> {
-        let mut workspaces = self.workspaces.write().await;
-        let workspace = workspaces
-            .values_mut()
-            .find(|workspace| &workspace.workspace_id == workspace_id)
-            .ok_or_else(|| RepositoryError::new("workspace not found"))?;
-        workspace.revision += 1;
-        Ok(workspace.revision)
-    }
 }
 
 #[derive(Clone, Default)]
 pub struct InMemoryPreviewRepository {
-    sessions: Arc<RwLock<HashMap<herdr_workbench_domain::WorkbenchWorkspaceId, PreviewSession>>>,
+    sessions: Arc<RwLock<HashMap<WorkbenchWorkspaceId, PreviewSession>>>,
+    revisions: Arc<RwLock<HashMap<WorkbenchWorkspaceId, u64>>>,
 }
 
 impl InMemoryPreviewRepository {
     pub async fn session_count(&self) -> usize {
         self.sessions.read().await.len()
     }
+
+    pub async fn revision(&self, workspace_id: &WorkbenchWorkspaceId) -> u64 {
+        *self.revisions.read().await.get(workspace_id).unwrap_or(&0)
+    }
 }
 
 #[async_trait]
-impl PreviewRepository for InMemoryPreviewRepository {
+impl PreviewTransactionRepository for InMemoryPreviewRepository {
     async fn find_by_workspace(
         &self,
-        workspace_id: &herdr_workbench_domain::WorkbenchWorkspaceId,
+        workspace_id: &WorkbenchWorkspaceId,
     ) -> Result<Option<PreviewSession>, RepositoryError> {
         Ok(self.sessions.read().await.get(workspace_id).cloned())
     }
 
-    async fn insert(&self, session: PreviewSession) -> Result<(), RepositoryError> {
-        self.sessions
-            .write()
-            .await
-            .entry(session.workspace_id.clone())
-            .or_insert(session);
-        Ok(())
+    async fn commit_preview_open(
+        &self,
+        workspace_id: &WorkbenchWorkspaceId,
+        session: PreviewSession,
+    ) -> Result<DurablePreviewCommit, RepositoryError> {
+        let mut sessions = self.sessions.write().await;
+        if let Some(existing) = sessions.get(workspace_id).cloned() {
+            return Ok(DurablePreviewCommit {
+                session: existing.clone(),
+                event: AppEvent::preview_opened(
+                    existing,
+                    *self.revisions.read().await.get(workspace_id).unwrap_or(&0),
+                ),
+            });
+        }
+
+        let mut revisions = self.revisions.write().await;
+        let revision = revisions.entry(workspace_id.clone()).or_insert(0);
+        *revision += 1;
+        sessions.insert(workspace_id.clone(), session.clone());
+        Ok(DurablePreviewCommit {
+            event: AppEvent::preview_opened(session.clone(), *revision),
+            session,
+        })
     }
 }
 
@@ -250,7 +266,7 @@ pub enum ApplicationError {
 }
 
 #[derive(Clone, Debug, Error)]
-#[error("workspace repository failed: {message}")]
+#[error("repository operation failed: {message}")]
 pub struct RepositoryError {
     message: String,
 }
@@ -302,7 +318,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn opening_preview_publishes_a_typed_event_with_the_new_revision() {
+    async fn opening_preview_commits_state_and_publishes_the_same_revision() {
         let workspaces = InMemoryWorkspaceRepository::default();
         let workspace = BindWorkspace::new(&workspaces)
             .execute(
@@ -318,23 +334,24 @@ mod tests {
         let previews = InMemoryPreviewRepository::default();
         let events = EventBus::new(16);
         let mut receiver = events.subscribe();
-        let use_case = OpenPreview::new(&workspaces, &previews, &FakePreviewAdapter, &events);
+        let use_case = OpenPreview::new(&previews, &FakePreviewAdapter, &events);
 
-        use_case
+        let session = use_case
             .execute(&workspace, Some("http://localhost:3000".into()))
             .await
             .unwrap();
-
         let event = receiver.recv().await.unwrap();
+
+        assert_eq!(session.workspace_id, workspace.workspace_id);
+        assert_eq!(previews.session_count().await, 1);
+        assert_eq!(previews.revision(&workspace.workspace_id).await, 1);
         assert_eq!(event.event_type, EventType::PreviewOpened);
-        assert_eq!(event.workspace_id, workspace.workspace_id);
         assert_eq!(event.revision, 1);
         assert!(matches!(event.payload, EventPayload::PreviewOpened(_)));
-        assert_eq!(workspaces.revision(&workspace.workspace_id).await, 1);
     }
 
     #[tokio::test]
-    async fn opening_preview_again_reuses_the_existing_session() {
+    async fn opening_preview_again_is_idempotent_and_does_not_advance_revision() {
         let workspaces = InMemoryWorkspaceRepository::default();
         let workspace = BindWorkspace::new(&workspaces)
             .execute(
@@ -350,17 +367,13 @@ mod tests {
         let previews = InMemoryPreviewRepository::default();
         let events = EventBus::new(16);
         let mut receiver = events.subscribe();
-        let use_case = OpenPreview::new(&workspaces, &previews, &FakePreviewAdapter, &events);
+        let use_case = OpenPreview::new(&previews, &FakePreviewAdapter, &events);
 
         let first = use_case.execute(&workspace, None).await.unwrap();
-        let second = use_case
-            .execute(&workspace, Some("http://localhost:4000".into()))
-            .await
-            .unwrap();
+        let second = use_case.execute(&workspace, None).await.unwrap();
 
         assert_eq!(first.session_id, second.session_id);
-        assert_eq!(previews.session_count().await, 1);
-        assert_eq!(workspaces.revision(&workspace.workspace_id).await, 1);
+        assert_eq!(previews.revision(&workspace.workspace_id).await, 1);
         assert!(receiver.try_recv().is_ok());
         assert!(receiver.try_recv().is_err());
     }

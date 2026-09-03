@@ -135,6 +135,14 @@ impl WorkspaceRepository for EmptyWorkspaceRepository {
         Ok(None)
     }
 
+    async fn find_by_id(
+        &self,
+        _id: &herdr_workbench_domain::WorkbenchWorkspaceId,
+    ) -> Result<Option<herdr_workbench_domain::Workspace>, herdr_workbench_app_core::RepositoryError>
+    {
+        Ok(None)
+    }
+
     async fn list(
         &self,
     ) -> Result<Vec<herdr_workbench_domain::Workspace>, herdr_workbench_app_core::RepositoryError>
@@ -147,13 +155,6 @@ impl WorkspaceRepository for EmptyWorkspaceRepository {
         _workspace: herdr_workbench_domain::Workspace,
     ) -> Result<(), herdr_workbench_app_core::RepositoryError> {
         Ok(())
-    }
-
-    async fn increment_revision(
-        &self,
-        _workspace_id: &herdr_workbench_domain::WorkbenchWorkspaceId,
-    ) -> Result<u64, herdr_workbench_app_core::RepositoryError> {
-        Ok(0)
     }
 }
 
