@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use utoipa::{OpenApi, ToSchema};
 
 #[derive(Clone, Debug, Serialize, ToSchema)]
@@ -32,12 +32,31 @@ pub struct WorkspaceListResponse {
     pub workspaces: Vec<WorkspaceDto>,
 }
 
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+pub struct PreviewOpenRequest {
+    pub url: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct PreviewStateResponse {
     pub workspace: WorkspaceDto,
     pub preview_session_id: Option<String>,
     pub preview_url: Option<String>,
     pub preview_status: Option<String>,
+}
+
+impl PreviewStateResponse {
+    pub fn from_parts(
+        workspace: herdr_workbench_domain::Workspace,
+        preview: Option<herdr_workbench_domain::PreviewSession>,
+    ) -> Self {
+        Self {
+            workspace: WorkspaceDto::from(workspace),
+            preview_session_id: preview.as_ref().map(|p| p.session_id.as_uuid().to_string()),
+            preview_url: preview.as_ref().and_then(|p| p.url.clone()),
+            preview_status: preview.map(|p| format!("{:?}", p.status)),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, ToSchema)]
@@ -54,45 +73,34 @@ pub struct ErrorBody {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(
-        health,
-        list_workspaces,
-        get_workspace_state,
-    ),
+    paths(health, list_workspaces, get_workspace_state, open_preview),
     components(schemas(
-        HealthResponse,
-        WorkspaceDto,
-        WorkspaceListResponse,
-        PreviewStateResponse,
-        ErrorResponse,
-        ErrorBody,
+        HealthResponse, WorkspaceDto, WorkspaceListResponse, PreviewOpenRequest,
+        PreviewStateResponse, ErrorResponse, ErrorBody
     )),
     tags((name = "system", description = "Workbench system endpoints"))
 )]
 pub struct ApiDoc;
 
-#[utoipa::path(
-    get,
-    path = "/api/v1/health",
-    tag = "system",
-    responses((status = 200, body = HealthResponse))
-)]
+#[utoipa::path(get, path = "/api/v1/health", tag = "system", responses((status = 200, body = HealthResponse)))]
 pub fn health() {}
 
-#[utoipa::path(
-    get,
-    path = "/api/v1/workspaces",
-    responses((status = 200, body = WorkspaceListResponse))
-)]
+#[utoipa::path(get, path = "/api/v1/workspaces", responses((status = 200, body = WorkspaceListResponse)))]
 pub fn list_workspaces() {}
 
 #[utoipa::path(
     get,
     path = "/api/v1/workspaces/{id}/state",
     params(("id" = String, Path, description = "Workbench workspace ID")),
-    responses(
-        (status = 200, body = PreviewStateResponse),
-        (status = 404, body = ErrorResponse)
-    )
+    responses((status = 200, body = PreviewStateResponse), (status = 404, body = ErrorResponse))
 )]
 pub fn get_workspace_state() {}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{id}/preview/open",
+    params(("id" = String, Path, description = "Workbench workspace ID")),
+    request_body = PreviewOpenRequest,
+    responses((status = 200, body = PreviewStateResponse), (status = 404, body = ErrorResponse), (status = 503, body = ErrorResponse))
+)]
+pub fn open_preview() {}
