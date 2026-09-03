@@ -534,6 +534,7 @@ dependencies = [
  "async-trait",
  "herdr-workbench-app-core",
  "herdr-workbench-domain",
+ "serde_json",
  "sqlx",
  "tokio",
  "uuid",
