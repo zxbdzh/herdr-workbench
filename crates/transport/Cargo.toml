@@ -17,6 +17,7 @@ tokio.workspace = true
 async-trait.workspace = true
 utoipa = { version = "5", features = ["chrono", "uuid"] }
 rust-embed = "8"
+uuid.workspace = true
 
 [dev-dependencies]
 tower = "0.5"

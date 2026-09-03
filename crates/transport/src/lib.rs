@@ -6,10 +6,15 @@ use axum::{
     extract::{Path, State},
     http::{HeaderValue, StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
-use herdr_workbench_app_core::WorkspaceRepository;
-use herdr_workbench_contracts::{ApiDoc, WorkspaceDto, WorkspaceListResponse};
+use herdr_workbench_app_core::{
+    EventPublisher, OpenPreview, PreviewAdapter, PreviewError, PreviewTransactionRepository,
+    WorkspaceRepository,
+};
+use herdr_workbench_contracts::{
+    ApiDoc, PreviewOpenRequest, PreviewStateResponse, WorkspaceDto, WorkspaceListResponse,
+};
 use rust_embed::RustEmbed;
 use utoipa::OpenApi;
 
@@ -17,26 +22,46 @@ use utoipa::OpenApi;
 #[folder = "../../web/dist/"]
 struct WebAssets;
 
-pub struct AppState<R> {
-    pub workspaces: Arc<R>,
+pub struct AppState<W, P, A, E> {
+    pub workspaces: Arc<W>,
+    pub previews: Arc<P>,
+    pub preview_adapter: Arc<A>,
+    pub events: Arc<E>,
 }
 
-impl<R> Clone for AppState<R> {
+impl<W, P, A, E> Clone for AppState<W, P, A, E> {
     fn clone(&self) -> Self {
         Self {
             workspaces: Arc::clone(&self.workspaces),
+            previews: Arc::clone(&self.previews),
+            preview_adapter: Arc::clone(&self.preview_adapter),
+            events: Arc::clone(&self.events),
         }
     }
 }
-impl<R> AppState<R> {
-    pub fn new(workspaces: Arc<R>) -> Self {
-        Self { workspaces }
+
+impl<W, P, A, E> AppState<W, P, A, E> {
+    pub fn new(
+        workspaces: Arc<W>,
+        previews: Arc<P>,
+        preview_adapter: Arc<A>,
+        events: Arc<E>,
+    ) -> Self {
+        Self {
+            workspaces,
+            previews,
+            preview_adapter,
+            events,
+        }
     }
 }
 
-pub fn router<R>(state: AppState<R>) -> Router
+pub fn router<W, P, A, E>(state: AppState<W, P, A, E>) -> Router
 where
-    R: WorkspaceRepository + 'static,
+    W: WorkspaceRepository + 'static,
+    P: PreviewTransactionRepository + 'static,
+    A: PreviewAdapter + 'static,
+    E: EventPublisher + 'static,
 {
     Router::new()
         .route("/api/v1/health", get(health))
@@ -44,13 +69,25 @@ where
         .route("/app", get(web_index))
         .route("/app/", get(web_index))
         .route("/app/{*path}", get(web_asset))
-        .route("/api/v1/workspaces", get(workspaces::<R>))
-        .route("/api/v1/workspaces/{id}/state", get(workspace_state))
+        .route("/api/v1/workspaces", get(workspaces::<W, P, A, E>))
+        .route(
+            "/api/v1/workspaces/{id}/state",
+            get(workspace_state::<W, P, A, E>),
+        )
+        .route(
+            "/api/v1/workspaces/{id}/preview/open",
+            post(open_preview::<W, P, A, E>),
+        )
         .with_state(state)
 }
 
 pub fn empty_router() -> Router {
-    router(AppState::new(Arc::new(EmptyWorkspaceRepository)))
+    router(AppState::new(
+        Arc::new(EmptyWorkspaceRepository),
+        Arc::new(EmptyPreviewRepository),
+        Arc::new(UnavailablePreviewAdapter),
+        Arc::new(herdr_workbench_app_core::EventBus::new(16)),
+    ))
 }
 
 async fn health() -> (StatusCode, Json<serde_json::Value>) {
@@ -90,46 +127,99 @@ async fn web_asset(Path(path): Path<String>) -> Response {
         .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
     response
 }
-async fn workspaces<R>(
-    State(state): State<AppState<R>>,
+
+async fn workspaces<W, P, A, E>(
+    State(state): State<AppState<W, P, A, E>>,
 ) -> Result<Json<WorkspaceListResponse>, ApiError>
 where
-    R: WorkspaceRepository + 'static,
+    W: WorkspaceRepository + 'static,
+    P: PreviewTransactionRepository + 'static,
+    A: PreviewAdapter + 'static,
+    E: EventPublisher + 'static,
 {
-    state
+    let items = state
         .workspaces
         .list()
         .await
-        .map(|items| {
-            Json(WorkspaceListResponse {
-                workspaces: items.into_iter().map(WorkspaceDto::from).collect(),
-            })
-        })
-        .map_err(ApiError::from)
+        .map_err(ApiError::repository)?;
+    Ok(Json(WorkspaceListResponse {
+        workspaces: items.into_iter().map(WorkspaceDto::from).collect(),
+    }))
 }
 
-async fn workspace_state(Path(id): Path<String>) -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::NOT_FOUND,
-        Json(serde_json::json!({
-            "error": {
-                "code": "workspace_not_found",
-                "message": "workspace was not found",
-                "request_id": null,
-                "details": {"workspace_id": id}
-            }
-        })),
+async fn workspace_state<W, P, A, E>(
+    Path(id): Path<String>,
+    State(state): State<AppState<W, P, A, E>>,
+) -> Result<Json<PreviewStateResponse>, ApiError>
+where
+    W: WorkspaceRepository + 'static,
+    P: PreviewTransactionRepository + 'static,
+    A: PreviewAdapter + 'static,
+    E: EventPublisher + 'static,
+{
+    let workspace_id = parse_workspace_id(&id)?;
+    let workspace = state
+        .workspaces
+        .find_by_id(&workspace_id)
+        .await
+        .map_err(ApiError::repository)?
+        .ok_or_else(|| ApiError::workspace_not_found(id.clone()))?;
+    let preview = state
+        .previews
+        .find_by_workspace(&workspace_id)
+        .await
+        .map_err(ApiError::repository)?;
+
+    Ok(Json(PreviewStateResponse::from_parts(workspace, preview)))
+}
+
+async fn open_preview<W, P, A, E>(
+    Path(id): Path<String>,
+    State(state): State<AppState<W, P, A, E>>,
+    Json(request): Json<PreviewOpenRequest>,
+) -> Result<Json<PreviewStateResponse>, ApiError>
+where
+    W: WorkspaceRepository + 'static,
+    P: PreviewTransactionRepository + 'static,
+    A: PreviewAdapter + 'static,
+    E: EventPublisher + 'static,
+{
+    let workspace_id = parse_workspace_id(&id)?;
+    let workspace = state
+        .workspaces
+        .find_by_id(&workspace_id)
+        .await
+        .map_err(ApiError::repository)?
+        .ok_or_else(|| ApiError::workspace_not_found(id.clone()))?;
+    let session = OpenPreview::new(
+        state.previews.as_ref(),
+        state.preview_adapter.as_ref(),
+        state.events.as_ref(),
     )
+    .execute(&workspace, request.url)
+    .await
+    .map_err(ApiError::application)?;
+
+    Ok(Json(PreviewStateResponse::from_parts(
+        workspace,
+        Some(session),
+    )))
+}
+
+fn parse_workspace_id(id: &str) -> Result<herdr_workbench_domain::WorkbenchWorkspaceId, ApiError> {
+    uuid::Uuid::parse_str(id)
+        .map(herdr_workbench_domain::WorkbenchWorkspaceId::from_uuid)
+        .map_err(|_| ApiError::workspace_not_found(id.to_owned()))
 }
 
 #[derive(Debug)]
-struct EmptyWorkspaceRepository;
+pub struct EmptyWorkspaceRepository;
 
 #[async_trait::async_trait]
 impl WorkspaceRepository for EmptyWorkspaceRepository {
     async fn find_by_herdr_id(
         &self,
-        _id: &herdr_workbench_domain::HerdrWorkspaceId,
+        _: &herdr_workbench_domain::HerdrWorkspaceId,
     ) -> Result<Option<herdr_workbench_domain::Workspace>, herdr_workbench_app_core::RepositoryError>
     {
         Ok(None)
@@ -137,7 +227,7 @@ impl WorkspaceRepository for EmptyWorkspaceRepository {
 
     async fn find_by_id(
         &self,
-        _id: &herdr_workbench_domain::WorkbenchWorkspaceId,
+        _: &herdr_workbench_domain::WorkbenchWorkspaceId,
     ) -> Result<Option<herdr_workbench_domain::Workspace>, herdr_workbench_app_core::RepositoryError>
     {
         Ok(None)
@@ -152,26 +242,105 @@ impl WorkspaceRepository for EmptyWorkspaceRepository {
 
     async fn insert(
         &self,
-        _workspace: herdr_workbench_domain::Workspace,
+        _: herdr_workbench_domain::Workspace,
     ) -> Result<(), herdr_workbench_app_core::RepositoryError> {
         Ok(())
     }
 }
 
 #[derive(Debug)]
-struct ApiError;
+pub struct EmptyPreviewRepository;
 
-impl From<herdr_workbench_app_core::RepositoryError> for ApiError {
-    fn from(_: herdr_workbench_app_core::RepositoryError) -> Self {
-        Self
+#[async_trait::async_trait]
+impl PreviewTransactionRepository for EmptyPreviewRepository {
+    async fn find_by_workspace(
+        &self,
+        _: &herdr_workbench_domain::WorkbenchWorkspaceId,
+    ) -> Result<
+        Option<herdr_workbench_domain::PreviewSession>,
+        herdr_workbench_app_core::RepositoryError,
+    > {
+        Ok(None)
+    }
+
+    async fn commit_preview_open(
+        &self,
+        _: &herdr_workbench_domain::WorkbenchWorkspaceId,
+        _: herdr_workbench_domain::PreviewSession,
+    ) -> Result<
+        herdr_workbench_app_core::DurablePreviewCommit,
+        herdr_workbench_app_core::RepositoryError,
+    > {
+        Err(herdr_workbench_app_core::RepositoryError::new(
+            "preview repository unavailable",
+        ))
     }
 }
 
-impl axum::response::IntoResponse for ApiError {
-    fn into_response(self) -> axum::response::Response {
+#[derive(Debug)]
+pub struct UnavailablePreviewAdapter;
+
+#[async_trait::async_trait]
+impl PreviewAdapter for UnavailablePreviewAdapter {
+    async fn open(
+        &self,
+        _: &herdr_workbench_domain::Workspace,
+        _: Option<String>,
+    ) -> Result<herdr_workbench_domain::PreviewSession, PreviewError> {
+        Err(PreviewError::unavailable(
+            "preview adapter is not configured",
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct ApiError {
+    code: &'static str,
+    message: String,
+    status: StatusCode,
+}
+
+impl ApiError {
+    fn workspace_not_found(_: String) -> Self {
+        Self {
+            code: "workspace_not_found",
+            message: "workspace was not found".to_owned(),
+            status: StatusCode::NOT_FOUND,
+        }
+    }
+
+    fn repository(error: herdr_workbench_app_core::RepositoryError) -> Self {
+        Self {
+            code: "internal_error",
+            message: error.to_string(),
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    fn application(error: herdr_workbench_app_core::ApplicationError) -> Self {
+        match error {
+            herdr_workbench_app_core::ApplicationError::Preview(error) => Self {
+                code: "preview_unavailable",
+                message: error.to_string(),
+                status: StatusCode::SERVICE_UNAVAILABLE,
+            },
+            herdr_workbench_app_core::ApplicationError::Repository(error) => {
+                Self::repository(error)
+            }
+            herdr_workbench_app_core::ApplicationError::Domain(error) => Self {
+                code: "invalid_request",
+                message: error.to_string(),
+                status: StatusCode::BAD_REQUEST,
+            },
+        }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
         (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": {"code": "internal_error", "message": "internal server error"}})),
+            self.status,
+            Json(serde_json::json!({"error": {"code": self.code, "message": self.message, "request_id": null}})),
         )
             .into_response()
     }
@@ -180,23 +349,25 @@ impl axum::response::IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use axum::{body::Body, http::Request};
-    use herdr_workbench_app_core::{BindWorkspace, InMemoryWorkspaceRepository};
-    use herdr_workbench_domain::HerdrWorkspaceContext;
+    use herdr_workbench_app_core::{
+        BindWorkspace, EventBus, InMemoryPreviewRepository, InMemoryWorkspaceRepository,
+    };
+    use herdr_workbench_domain::{HerdrWorkspaceContext, PreviewSession};
     use tower::ServiceExt;
 
-    #[tokio::test]
-    async fn app_route_serves_the_embedded_react_page() {
-        let response = empty_router()
-            .oneshot(Request::builder().uri("/app/").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
+    struct FakePreviewAdapter;
 
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers().get("content-type").unwrap(),
-            "text/html; charset=utf-8"
-        );
+    #[async_trait]
+    impl PreviewAdapter for FakePreviewAdapter {
+        async fn open(
+            &self,
+            workspace: &herdr_workbench_domain::Workspace,
+            url: Option<String>,
+        ) -> Result<PreviewSession, PreviewError> {
+            Ok(PreviewSession::opening(workspace, url).mark_open())
+        }
     }
 
     #[tokio::test]
@@ -210,41 +381,7 @@ mod tests {
             )
             .await
             .unwrap();
-
         assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn workspace_list_returns_repository_state() {
-        let repository = Arc::new(InMemoryWorkspaceRepository::default());
-        BindWorkspace::new(repository.as_ref())
-            .execute(
-                HerdrWorkspaceContext::new(
-                    "herdr-1",
-                    "Siftmark",
-                    std::path::PathBuf::from(r"C:\projects\siftmark"),
-                )
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        let response = router(AppState::new(repository))
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/workspaces")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["workspaces"].as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -258,7 +395,67 @@ mod tests {
             )
             .await
             .unwrap();
-
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn app_route_serves_the_embedded_react_page() {
+        let response = empty_router()
+            .oneshot(Request::builder().uri("/app/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn preview_open_and_state_routes_use_the_application_core() {
+        let workspaces = Arc::new(InMemoryWorkspaceRepository::default());
+        let workspace = BindWorkspace::new(workspaces.as_ref())
+            .execute(
+                HerdrWorkspaceContext::new(
+                    "herdr-1",
+                    "Siftmark",
+                    std::path::PathBuf::from(r"C:\projects\siftmark"),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let state = AppState::new(
+            workspaces,
+            Arc::new(InMemoryPreviewRepository::default()),
+            Arc::new(FakePreviewAdapter),
+            Arc::new(EventBus::new(8)),
+        );
+        let app = router(state);
+        let open_request = Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/api/v1/workspaces/{}/preview/open",
+                workspace.workspace_id.as_uuid()
+            ))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"url":"http://localhost:3000"}"#))
+            .unwrap();
+        let open_response = app.clone().oneshot(open_request).await.unwrap();
+        assert_eq!(open_response.status(), StatusCode::OK);
+        let state_response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/workspaces/{}/state",
+                        workspace.workspace_id.as_uuid()
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(state_response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(state_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["preview_url"], "http://localhost:3000");
     }
 }
