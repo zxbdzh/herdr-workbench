@@ -1,0 +1,38 @@
+[package]
+name = "herdr-workbench-desktop"
+version = "0.1.0"
+description = "Windows-first Herdr Workbench desktop host"
+authors = ["zxb"]
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/zxbdzh/herdr-workbench"
+
+[lib]
+name = "herdr_workbench_desktop_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[dependencies.herdr-workbench-app-core]
+path = "../crates/app-core"
+
+[dependencies.herdr-workbench-domain]
+path = "../crates/domain"
+
+[dependencies.herdr-workbench-server]
+path = "../crates/server"
+
+[dependencies.herdr-workbench-transport]
+path = "../crates/transport"
+
+[dependencies.tauri]
+version = "2.11.5"
+features = []

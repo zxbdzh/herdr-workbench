@@ -6,7 +6,12 @@
     "web:dev": "pnpm --dir web dev",
     "web:typecheck": "pnpm --dir web typecheck",
     "web:build": "pnpm --dir web build",
+    "tauri:dev": "pnpm exec tauri dev",
+    "tauri:build": "pnpm web:build && pnpm exec tauri build",
     "rust:test": "cargo test --workspace",
     "build": "pnpm web:build && cargo build --workspace"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4"
   }
 }

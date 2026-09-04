@@ -51,3 +51,6 @@ jobs:
 
       - name: Rust build
         run: cargo build --workspace
+
+      - name: Tauri desktop check
+        run: cargo check -p herdr-workbench-desktop

@@ -6,6 +6,7 @@ members = [
   "crates/transport",
   "crates/server",
   "crates/contracts",
+  "src-tauri",
 ]
 resolver = "2"
 
