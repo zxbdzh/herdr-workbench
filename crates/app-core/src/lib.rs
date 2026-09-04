@@ -281,8 +281,12 @@ impl PreviewStateUpdater for InMemoryPreviewRepository {
             .get_mut(workspace_id)
             .ok_or_else(|| RepositoryError::new("preview session not found"))?;
         session.status = status;
-        session.url = url;
-        session.title = title;
+        if let Some(url) = url {
+            session.url = Some(url);
+        }
+        if let Some(title) = title {
+            session.title = Some(title);
+        }
         Ok(session.clone())
     }
 }
