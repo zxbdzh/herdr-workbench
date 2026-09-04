@@ -1,0 +1,10 @@
+/target/
+
+# Node / frontend
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Local application data
+.env
+.env.*

@@ -1,0 +1,23 @@
+[package]
+name = "herdr-workbench-transport"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axum = "0.8"
+herdr-workbench-app-core = { path = "../app-core" }
+herdr-workbench-contracts = { path = "../contracts" }
+herdr-workbench-domain = { path = "../domain" }
+serde.workspace = true
+serde_json = "1"
+tokio.workspace = true
+async-trait.workspace = true
+utoipa = { version = "5", features = ["chrono", "uuid"] }
+rust-embed = "8"
+uuid.workspace = true
+
+[dev-dependencies]
+tower = "0.5"

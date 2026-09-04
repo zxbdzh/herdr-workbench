@@ -1,0 +1,24 @@
+[workspace]
+members = [
+  "crates/domain",
+  "crates/app-core",
+  "crates/adapters-sqlite",
+  "crates/transport",
+  "crates/server",
+  "crates/contracts",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/zxbdzh/herdr-workbench"
+rust-version = "1.88"
+
+[workspace.dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+uuid = { version = "1", features = ["v7", "serde"] }

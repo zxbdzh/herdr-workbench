@@ -1,0 +1,15 @@
+[package]
+name = "herdr-workbench-server"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axum = "0.8"
+herdr-workbench-adapters-sqlite = { path = "../adapters-sqlite" }
+herdr-workbench-app-core = { path = "../app-core" }
+herdr-workbench-transport = { path = "../transport" }
+rust-embed = "8"
+tokio.workspace = true

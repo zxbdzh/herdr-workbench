@@ -1,0 +1,79 @@
+name: 功能需求
+about: 提出一个具体、可验证的新功能
+title: "feat: "
+labels: ["needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请先确认这不是一个需要开放式讨论的架构问题；架构方向请使用 Discussions。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 问题
+      description: 从用户视角描述当前遇到的问题，不要直接跳到实现方案。
+      placeholder: 当……时，我无法……，导致……
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: 期望结果
+      description: 描述用户最终希望完成什么，以及如何判断完成。
+    validations:
+      required: true
+
+  - type: textarea
+    id: user-stories
+    attributes:
+      label: 用户故事
+      description: 使用“作为……，我希望……，从而……”描述受影响的角色和收益。
+      placeholder: |
+        1. 作为……，我希望……，从而……
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: 范围与非范围
+      description: 明确本次需求包含什么，以及明确不包含什么。
+      value: |
+        ## 包含
+
+        - 
+
+        ## 不包含
+
+        - 
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收标准
+      description: 写成可执行、可验证的条目；避免“体验良好”“性能优秀”等不可测表述。
+      placeholder: |
+        - [ ] 
+        - [ ] 
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: 补充上下文
+      description: 添加日志、截图、相关文档或现有架构位置。不要粘贴密钥、Cookie 或隐私数据。
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已经搜索过现有 Issue，确认不是重复需求。
+          required: true
+        - label: 我没有在内容中包含密钥、Cookie、token 或其他敏感信息。
+          required: true
