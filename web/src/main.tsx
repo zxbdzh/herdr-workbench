@@ -32,7 +32,10 @@ function App() {
     setOpening(workspace.workspace_id);
     setError(null);
     try {
-      const preview = await api<PreviewState>(`/api/v1/workspaces/${workspace.workspace_id}/state`);
+      const preview = await api<PreviewState>(`/api/v1/workspaces/${workspace.workspace_id}/preview/open`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
       setPreviews((current) => ({ ...current, [workspace.workspace_id]: preview }));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "无法读取 Preview 状态");
@@ -59,7 +62,7 @@ function App() {
           const preview = previews[workspace.workspace_id];
           return <article className="workspace" key={workspace.workspace_id}>
             <div className="workspace-index">W</div><div className="workspace-main"><h3>{workspace.label}</h3><code>{workspace.cwd}</code><span className="workspace-id">Herdr · {workspace.herdr_workspace_id}</span>{preview && <span className="preview-state">Preview · {preview.preview_status ?? "未打开"}{preview.preview_url ? ` · ${preview.preview_url}` : ""}</span>}</div>
-            <button className="preview-button" type="button" onClick={() => openPreview(workspace)} disabled={opening === workspace.workspace_id}>{opening === workspace.workspace_id ? "读取中..." : "查看 Preview"}</button><div className="revision">REV {workspace.revision}</div>
+            <button className="preview-button" type="button" onClick={() => openPreview(workspace)} disabled={opening === workspace.workspace_id}>{opening === workspace.workspace_id ? "打开中..." : "查看 Preview"}</button><div className="revision">REV {workspace.revision}</div>
           </article>;
         })}
       </section>
