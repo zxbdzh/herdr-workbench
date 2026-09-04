@@ -12,4 +12,6 @@ herdr-workbench-adapters-sqlite = { path = "../adapters-sqlite" }
 herdr-workbench-app-core = { path = "../app-core" }
 herdr-workbench-transport = { path = "../transport" }
 rust-embed = "8"
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "migrate"] }
+thiserror.workspace = true
 tokio.workspace = true
