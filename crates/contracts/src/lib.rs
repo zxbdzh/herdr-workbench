@@ -43,6 +43,7 @@ pub struct PreviewStateResponse {
     pub preview_session_id: Option<String>,
     pub preview_url: Option<String>,
     pub preview_status: Option<String>,
+    pub preview_title: Option<String>,
 }
 
 impl PreviewStateResponse {
@@ -54,7 +55,8 @@ impl PreviewStateResponse {
             workspace: WorkspaceDto::from(workspace),
             preview_session_id: preview.as_ref().map(|p| p.session_id.as_uuid().to_string()),
             preview_url: preview.as_ref().and_then(|p| p.url.clone()),
-            preview_status: preview.map(|p| format!("{:?}", p.status)),
+            preview_status: preview.as_ref().map(|p| format!("{:?}", p.status)),
+            preview_title: preview.and_then(|p| p.title),
         }
     }
 }

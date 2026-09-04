@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use herdr_workbench_app_core::{
-    DurablePreviewCommit, PreviewTransactionRepository, RepositoryError, WorkspaceRepository,
+    DurablePreviewCommit, PreviewStateUpdater, PreviewTransactionRepository, RepositoryError,
+    WorkspaceRepository,
 };
 use herdr_workbench_domain::{
     AppEvent, HerdrWorkspaceContext, HerdrWorkspaceId, PreviewSession, PreviewStatus,
@@ -104,7 +105,7 @@ impl PreviewTransactionRepository for SqliteWorkspaceRepository {
         &self,
         id: &WorkbenchWorkspaceId,
     ) -> Result<Option<PreviewSession>, RepositoryError> {
-        let row = sqlx::query_as::<_, PreviewRow>("SELECT session_id, workspace_id, url, status FROM preview_sessions WHERE workspace_id = ?")
+        let row = sqlx::query_as::<_, PreviewRow>("SELECT session_id, workspace_id, url, title, status FROM preview_sessions WHERE workspace_id = ?")
             .bind(id.as_uuid().to_string()).fetch_optional(&self.pool).await.map_err(db_error)?;
         row.map(PreviewRow::into_session)
             .transpose()
@@ -122,14 +123,45 @@ impl PreviewTransactionRepository for SqliteWorkspaceRepository {
         let event = AppEvent::preview_opened(session.clone(), revision as u64);
         let payload =
             serde_json::to_string(&event).map_err(|e| RepositoryError::new(e.to_string()))?;
-        sqlx::query("INSERT INTO preview_sessions (session_id, workspace_id, url, status) VALUES (?, ?, ?, ?)")
-            .bind(session.session_id.as_uuid().to_string()).bind(id.as_uuid().to_string()).bind(session.url.clone()).bind("open")
+        sqlx::query("INSERT INTO preview_sessions (session_id, workspace_id, url, title, status) VALUES (?, ?, ?, ?, ?)")
+                    .bind(session.session_id.as_uuid().to_string()).bind(id.as_uuid().to_string()).bind(session.url.clone()).bind(session.title.clone()).bind("open")
             .execute(&mut *tx).await.map_err(db_error)?;
         sqlx::query("INSERT INTO durable_events (event_id, event_type, workspace_id, occurred_at, revision, payload) VALUES (?, ?, ?, ?, ?, ?)")
             .bind(event.event_id.to_string()).bind("preview_opened").bind(id.as_uuid().to_string()).bind(event.occurred_at.to_rfc3339()).bind(revision).bind(payload)
             .execute(&mut *tx).await.map_err(db_error)?;
         tx.commit().await.map_err(db_error)?;
         Ok(DurablePreviewCommit { session, event })
+    }
+}
+
+#[async_trait]
+impl PreviewStateUpdater for SqliteWorkspaceRepository {
+    async fn update_preview_state(
+        &self,
+        id: &WorkbenchWorkspaceId,
+        status: PreviewStatus,
+        url: Option<String>,
+        title: Option<String>,
+    ) -> Result<PreviewSession, RepositoryError> {
+        let status = match status {
+            PreviewStatus::Open => "open",
+            PreviewStatus::Opening => "opening",
+            PreviewStatus::Unavailable => "unavailable",
+        };
+        let result = sqlx::query("UPDATE preview_sessions SET url = ?, title = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE workspace_id = ?")
+            .bind(&url)
+            .bind(&title)
+            .bind(status)
+            .bind(id.as_uuid().to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(db_error)?;
+        if result.rows_affected() == 0 {
+            return Err(RepositoryError::new("preview session not found"));
+        }
+        PreviewTransactionRepository::find_by_workspace(self, id)
+            .await?
+            .ok_or_else(|| RepositoryError::new("preview session not found"))
     }
 }
 
@@ -166,6 +198,7 @@ struct PreviewRow {
     session_id: String,
     workspace_id: String,
     url: Option<String>,
+    title: Option<String>,
     status: String,
 }
 impl PreviewRow {
@@ -178,6 +211,7 @@ impl PreviewRow {
                 uuid::Uuid::parse_str(&self.workspace_id).map_err(|e| e.to_string())?,
             ),
             url: self.url,
+            title: self.title,
             status: match self.status.as_str() {
                 "open" => PreviewStatus::Open,
                 "opening" => PreviewStatus::Opening,
