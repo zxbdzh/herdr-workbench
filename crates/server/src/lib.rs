@@ -21,10 +21,7 @@ pub enum ServerError {
     Serve(#[source] std::io::Error),
 }
 
-pub async fn serve<A>(preview_adapter: Arc<A>) -> Result<(), ServerError>
-where
-    A: PreviewAdapter + 'static,
-{
+pub async fn connect_repository() -> Result<Arc<SqliteWorkspaceRepository>, ServerError> {
     let data_dir = env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
@@ -45,7 +42,24 @@ where
         .migrate()
         .await
         .map_err(ServerError::MigrateDatabase)?;
+    Ok(repository)
+}
 
+pub async fn serve<A>(preview_adapter: Arc<A>) -> Result<(), ServerError>
+where
+    A: PreviewAdapter + 'static,
+{
+    let repository = connect_repository().await?;
+    serve_with_repository(repository, preview_adapter).await
+}
+
+pub async fn serve_with_repository<A>(
+    repository: Arc<SqliteWorkspaceRepository>,
+    preview_adapter: Arc<A>,
+) -> Result<(), ServerError>
+where
+    A: PreviewAdapter + 'static,
+{
     let events = Arc::new(EventBus::new(256));
     let address: SocketAddr = DEFAULT_ADDRESS.parse().expect("valid localhost address");
     let listener = tokio::net::TcpListener::bind(address)
