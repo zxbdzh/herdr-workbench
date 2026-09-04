@@ -2,7 +2,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use herdr_workbench_domain::{
-    AppEvent, DomainError, HerdrWorkspaceId, PreviewSession, WorkbenchWorkspaceId, Workspace,
+    AppEvent, DomainError, HerdrWorkspaceId, PreviewSession, PreviewStatus, WorkbenchWorkspaceId,
+    Workspace,
 };
 use thiserror::Error;
 use tokio::sync::{RwLock, broadcast};
@@ -77,6 +78,17 @@ pub trait PreviewTransactionRepository: Send + Sync {
         workspace_id: &WorkbenchWorkspaceId,
         session: PreviewSession,
     ) -> Result<DurablePreviewCommit, RepositoryError>;
+}
+
+#[async_trait]
+pub trait PreviewStateUpdater: Send + Sync {
+    async fn update_preview_state(
+        &self,
+        workspace_id: &WorkbenchWorkspaceId,
+        status: PreviewStatus,
+        url: Option<String>,
+        title: Option<String>,
+    ) -> Result<PreviewSession, RepositoryError>;
 }
 
 #[derive(Clone, Debug)]
@@ -252,6 +264,26 @@ impl PreviewTransactionRepository for InMemoryPreviewRepository {
             event: AppEvent::preview_opened(session.clone(), *revision),
             session,
         })
+    }
+}
+
+#[async_trait]
+impl PreviewStateUpdater for InMemoryPreviewRepository {
+    async fn update_preview_state(
+        &self,
+        workspace_id: &WorkbenchWorkspaceId,
+        status: PreviewStatus,
+        url: Option<String>,
+        title: Option<String>,
+    ) -> Result<PreviewSession, RepositoryError> {
+        let mut sessions = self.sessions.write().await;
+        let session = sessions
+            .get_mut(workspace_id)
+            .ok_or_else(|| RepositoryError::new("preview session not found"))?;
+        session.status = status;
+        session.url = url;
+        session.title = title;
+        Ok(session.clone())
     }
 }
 

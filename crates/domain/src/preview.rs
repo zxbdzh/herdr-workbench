@@ -38,6 +38,7 @@ pub struct PreviewSession {
     pub session_id: PreviewSessionId,
     pub workspace_id: WorkbenchWorkspaceId,
     pub url: Option<String>,
+    pub title: Option<String>,
     pub status: PreviewStatus,
 }
 
@@ -47,6 +48,7 @@ impl PreviewSession {
             session_id: PreviewSessionId::new(),
             workspace_id: workspace.workspace_id.clone(),
             url,
+            title: None,
             status: PreviewStatus::Opening,
         }
     }
