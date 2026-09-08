@@ -2,8 +2,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use herdr_workbench_domain::{
-    AppEvent, DomainError, HerdrWorkspaceId, PreviewScreenshot, PreviewSession, PreviewStatus,
-    WorkbenchWorkspaceId, Workspace,
+    AppEvent, DomainError, HerdrWorkspaceId, PreviewDiagnostic, PreviewScreenshot, PreviewSession,
+    PreviewStatus, WorkbenchWorkspaceId, Workspace,
 };
 use thiserror::Error;
 use tokio::sync::{RwLock, broadcast};
@@ -112,6 +112,46 @@ pub trait PreviewStateUpdater: Send + Sync {
         url: Option<String>,
         title: Option<String>,
     ) -> Result<PreviewSession, RepositoryError>;
+}
+
+pub const PREVIEW_DIAGNOSTIC_LIMIT: usize = 50;
+
+#[async_trait]
+pub trait PreviewDiagnosticsSink: Send + Sync {
+    async fn record(&self, diagnostic: PreviewDiagnostic);
+    async fn list(&self, workspace_id: &WorkbenchWorkspaceId) -> Vec<PreviewDiagnostic>;
+    async fn clear(&self, workspace_id: &WorkbenchWorkspaceId);
+}
+
+#[derive(Clone, Default)]
+pub struct InMemoryPreviewDiagnostics {
+    entries: Arc<RwLock<HashMap<WorkbenchWorkspaceId, Vec<PreviewDiagnostic>>>>,
+}
+
+#[async_trait]
+impl PreviewDiagnosticsSink for InMemoryPreviewDiagnostics {
+    async fn record(&self, diagnostic: PreviewDiagnostic) {
+        let mut entries = self.entries.write().await;
+        let buffer = entries.entry(diagnostic.workspace_id.clone()).or_default();
+        buffer.push(diagnostic);
+        let overflow = buffer.len().saturating_sub(PREVIEW_DIAGNOSTIC_LIMIT);
+        if overflow > 0 {
+            buffer.drain(0..overflow);
+        }
+    }
+
+    async fn list(&self, workspace_id: &WorkbenchWorkspaceId) -> Vec<PreviewDiagnostic> {
+        self.entries
+            .read()
+            .await
+            .get(workspace_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    async fn clear(&self, workspace_id: &WorkbenchWorkspaceId) {
+        self.entries.write().await.remove(workspace_id);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -482,12 +522,15 @@ mod tests {
 
     use super::{
         BindWorkspace, CapturePreview, CapturedPreviewImage, EventBus, HerdrWorkspaceContext,
-        InMemoryPreviewRepository, InMemoryScreenshotStore, InMemoryWorkspaceRepository,
-        OpenPreview, PreviewAdapter, PreviewError, PreviewScreenshotRepository,
-        PreviewStateUpdater, ScreenshotStore,
+        InMemoryPreviewDiagnostics, InMemoryPreviewRepository, InMemoryScreenshotStore,
+        InMemoryWorkspaceRepository, OpenPreview, PreviewAdapter, PreviewDiagnosticsSink,
+        PreviewError, PreviewScreenshotRepository, PreviewStateUpdater, ScreenshotStore,
     };
     use async_trait::async_trait;
-    use herdr_workbench_domain::{EventPayload, EventType, PreviewSession};
+    use herdr_workbench_domain::{
+        EventPayload, EventType, PreviewDiagnostic, PreviewDiagnosticKind, PreviewDiagnosticLevel,
+        PreviewSession,
+    };
 
     struct FakePreviewAdapter;
 
@@ -704,5 +747,48 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    fn sample_diagnostic(
+        workspace: &herdr_workbench_domain::Workspace,
+        message: &str,
+    ) -> PreviewDiagnostic {
+        PreviewDiagnostic {
+            workspace_id: workspace.workspace_id.clone(),
+            kind: PreviewDiagnosticKind::Console,
+            level: PreviewDiagnosticLevel::Error,
+            message: message.to_owned(),
+            source: Some("http://localhost:3000/app.js".into()),
+            status: None,
+            occurred_at: chrono::Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn recording_diagnostics_keeps_the_latest_fifty_and_can_be_cleared() {
+        let workspaces = InMemoryWorkspaceRepository::default();
+        let workspace = BindWorkspace::new(&workspaces)
+            .execute(
+                HerdrWorkspaceContext::new(
+                    "herdr-workspace-1",
+                    "Siftmark",
+                    PathBuf::from(r"C:\projects\siftmark"),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let sink = InMemoryPreviewDiagnostics::default();
+        sink.record(sample_diagnostic(&workspace, "first")).await;
+        for index in 0..super::PREVIEW_DIAGNOSTIC_LIMIT {
+            sink.record(sample_diagnostic(&workspace, &format!("msg-{index}")))
+                .await;
+        }
+        let listed = sink.list(&workspace.workspace_id).await;
+        assert_eq!(listed.len(), super::PREVIEW_DIAGNOSTIC_LIMIT);
+        assert_eq!(listed[0].message, "msg-0");
+        assert_eq!(listed.last().unwrap().message, "msg-49");
+        sink.clear(&workspace.workspace_id).await;
+        assert!(sink.list(&workspace.workspace_id).await.is_empty());
     }
 }

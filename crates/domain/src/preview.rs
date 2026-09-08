@@ -68,3 +68,27 @@ pub struct PreviewScreenshot {
     pub byte_size: u64,
     pub revision: u64,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PreviewDiagnosticKind {
+    Console,
+    Exception,
+    Network,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PreviewDiagnosticLevel {
+    Warning,
+    Error,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewDiagnostic {
+    pub workspace_id: WorkbenchWorkspaceId,
+    pub kind: PreviewDiagnosticKind,
+    pub level: PreviewDiagnosticLevel,
+    pub message: String,
+    pub source: Option<String>,
+    pub status: Option<u16>,
+    pub occurred_at: chrono::DateTime<chrono::Utc>,
+}

@@ -1,7 +1,9 @@
 use std::{env, fs, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use herdr_workbench_adapters_sqlite::{FilesystemScreenshotStore, SqliteWorkspaceRepository};
-use herdr_workbench_app_core::{EventBus, PreviewAdapter};
+use herdr_workbench_app_core::{
+    EventBus, InMemoryPreviewDiagnostics, PreviewAdapter, PreviewDiagnosticsSink,
+};
 use herdr_workbench_transport::{AppState, router};
 use thiserror::Error;
 
@@ -59,12 +61,18 @@ where
     A: PreviewAdapter + 'static,
 {
     let repository = connect_repository().await?;
-    serve_with_repository(repository, preview_adapter).await
+    serve_with_repository(
+        repository,
+        preview_adapter,
+        Arc::new(InMemoryPreviewDiagnostics::default()),
+    )
+    .await
 }
 
 pub async fn serve_with_repository<A>(
     repository: Arc<SqliteWorkspaceRepository>,
     preview_adapter: Arc<A>,
+    diagnostics: Arc<dyn PreviewDiagnosticsSink>,
 ) -> Result<(), ServerError>
 where
     A: PreviewAdapter + 'static,
@@ -83,6 +91,7 @@ where
             preview_adapter,
             events,
             screenshot_store(),
+            diagnostics,
         )),
     )
     .await

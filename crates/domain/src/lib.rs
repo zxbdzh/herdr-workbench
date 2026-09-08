@@ -4,7 +4,10 @@ pub mod events;
 pub mod preview;
 
 pub use events::{AppEvent, EventPayload, EventType, PreviewOpened, PreviewScreenshotCaptured};
-pub use preview::{PreviewScreenshot, PreviewSession, PreviewSessionId, PreviewStatus};
+pub use preview::{
+    PreviewDiagnostic, PreviewDiagnosticKind, PreviewDiagnosticLevel, PreviewScreenshot,
+    PreviewSession, PreviewSessionId, PreviewStatus,
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

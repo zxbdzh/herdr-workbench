@@ -1501,6 +1501,7 @@ name = "herdr-workbench-app-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "herdr-workbench-domain",
  "sha2 0.10.9",
  "thiserror 2.0.20",
@@ -1522,6 +1523,7 @@ name = "herdr-workbench-desktop"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "herdr-workbench-app-core",
  "herdr-workbench-domain",
  "herdr-workbench-server",
@@ -1567,6 +1569,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "chrono",
  "herdr-workbench-app-core",
  "herdr-workbench-contracts",
  "herdr-workbench-domain",
