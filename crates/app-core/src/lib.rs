@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use herdr_workbench_domain::{
@@ -9,6 +9,40 @@ use thiserror::Error;
 use tokio::sync::{RwLock, broadcast};
 
 pub use herdr_workbench_domain::HerdrWorkspaceContext;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HerdrWorkspaceInfo {
+    pub workspace_id: String,
+    pub label: String,
+    pub worktree_checkout_path: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HerdrPaneInfo {
+    pub workspace_id: String,
+    pub cwd: Option<PathBuf>,
+    pub focused: bool,
+}
+
+#[async_trait]
+pub trait HerdrHost: Send + Sync {
+    async fn list_workspaces(&self) -> Result<Vec<HerdrWorkspaceInfo>, HerdrHostError>;
+    async fn list_panes(&self) -> Result<Vec<HerdrPaneInfo>, HerdrHostError>;
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+#[error("Herdr host is unavailable: {message}")]
+pub struct HerdrHostError {
+    message: String,
+}
+
+impl HerdrHostError {
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
 
 #[async_trait]
 pub trait WorkspaceRepository: Send + Sync {
@@ -55,6 +89,65 @@ where
         self.repository.insert(workspace.clone()).await?;
         Ok(workspace)
     }
+}
+
+pub struct SyncHerdrWorkspaces<'a, R, H> {
+    repository: &'a R,
+    host: &'a H,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HerdrWorkspaceSyncReport {
+    pub bound: Vec<Workspace>,
+    pub skipped: usize,
+}
+
+impl<'a, R, H> SyncHerdrWorkspaces<'a, R, H>
+where
+    R: WorkspaceRepository,
+    H: HerdrHost,
+{
+    pub fn new(repository: &'a R, host: &'a H) -> Self {
+        Self { repository, host }
+    }
+
+    pub async fn execute(&self) -> Result<HerdrWorkspaceSyncReport, ApplicationError> {
+        let workspaces = self.host.list_workspaces().await?;
+        let panes = self.host.list_panes().await?;
+        let mut bound = Vec::new();
+        let mut skipped = 0;
+
+        for workspace in workspaces {
+            match derive_workspace_context(&workspace, &panes) {
+                Ok(context) => {
+                    bound.push(BindWorkspace::new(self.repository).execute(context).await?);
+                }
+                Err(_) => skipped += 1,
+            }
+        }
+
+        Ok(HerdrWorkspaceSyncReport { bound, skipped })
+    }
+}
+
+fn derive_workspace_context(
+    workspace: &HerdrWorkspaceInfo,
+    panes: &[HerdrPaneInfo],
+) -> Result<HerdrWorkspaceContext, DomainError> {
+    let owned: Vec<&HerdrPaneInfo> = panes
+        .iter()
+        .filter(|pane| pane.workspace_id == workspace.workspace_id)
+        .collect();
+    let focused_cwd = owned
+        .iter()
+        .find(|pane| pane.focused)
+        .and_then(|pane| pane.cwd.clone());
+    let first_cwd = owned.iter().find_map(|pane| pane.cwd.clone());
+    let cwd = focused_cwd
+        .or(first_cwd)
+        .or_else(|| workspace.worktree_checkout_path.clone())
+        .ok_or(DomainError::WorkspaceRootMustBeAbsolute)?;
+    HerdrWorkspaceContext::new(&workspace.workspace_id, &workspace.label, cwd)
 }
 
 #[async_trait]
@@ -502,6 +595,8 @@ pub enum ApplicationError {
     Repository(#[from] RepositoryError),
     #[error(transparent)]
     Preview(#[from] PreviewError),
+    #[error(transparent)]
+    Herdr(#[from] HerdrHostError),
 }
 
 #[derive(Clone, Debug, Error)]
@@ -537,10 +632,12 @@ mod tests {
     use std::{path::PathBuf, sync::Arc};
 
     use super::{
-        BindWorkspace, CapturePreview, CapturedPreviewImage, EventBus, HerdrWorkspaceContext,
-        InMemoryPreviewDiagnostics, InMemoryPreviewRepository, InMemoryScreenshotStore,
-        InMemoryWorkspaceRepository, OpenPreview, PreviewAdapter, PreviewDiagnosticsSink,
-        PreviewError, PreviewScreenshotRepository, PreviewStateUpdater, ScreenshotStore,
+        BindWorkspace, CapturePreview, CapturedPreviewImage, EventBus, HerdrHost, HerdrHostError,
+        HerdrPaneInfo, HerdrWorkspaceContext, HerdrWorkspaceInfo, InMemoryPreviewDiagnostics,
+        InMemoryPreviewRepository, InMemoryScreenshotStore, InMemoryWorkspaceRepository,
+        OpenPreview, PreviewAdapter, PreviewDiagnosticsSink, PreviewError,
+        PreviewScreenshotRepository, PreviewStateUpdater, ScreenshotStore, SyncHerdrWorkspaces,
+        WorkspaceRepository,
     };
     use async_trait::async_trait;
     use herdr_workbench_domain::{
@@ -830,5 +927,190 @@ mod tests {
         assert_eq!(event.event_type, EventType::PreviewDiagnosticsUpdated);
         assert_eq!(event.revision, 0);
         assert_eq!(event.workspace_id, workspace.workspace_id);
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeHerdrHost {
+        workspaces: Vec<HerdrWorkspaceInfo>,
+        panes: Vec<HerdrPaneInfo>,
+        error: Option<HerdrHostError>,
+    }
+
+    #[async_trait]
+    impl HerdrHost for FakeHerdrHost {
+        async fn list_workspaces(&self) -> Result<Vec<HerdrWorkspaceInfo>, HerdrHostError> {
+            if let Some(error) = &self.error {
+                return Err(error.clone());
+            }
+            Ok(self.workspaces.clone())
+        }
+
+        async fn list_panes(&self) -> Result<Vec<HerdrPaneInfo>, HerdrHostError> {
+            if let Some(error) = &self.error {
+                return Err(error.clone());
+            }
+            Ok(self.panes.clone())
+        }
+    }
+
+    fn sample_host_workspace(id: &str, label: &str) -> HerdrWorkspaceInfo {
+        HerdrWorkspaceInfo {
+            workspace_id: id.into(),
+            label: label.into(),
+            worktree_checkout_path: None,
+        }
+    }
+
+    fn sample_pane(workspace_id: &str, cwd: &str, focused: bool) -> HerdrPaneInfo {
+        HerdrPaneInfo {
+            workspace_id: workspace_id.into(),
+            cwd: Some(PathBuf::from(cwd)),
+            focused,
+        }
+    }
+
+    #[tokio::test]
+    async fn syncing_herdr_workspaces_binds_each_workspace_from_its_pane_cwd() {
+        let repository = InMemoryWorkspaceRepository::default();
+        let host = FakeHerdrHost {
+            workspaces: vec![
+                sample_host_workspace("wD", "code"),
+                sample_host_workspace("w9", "other"),
+            ],
+            panes: vec![
+                sample_pane("wD", r"D:\Code\huajingweb", true),
+                sample_pane("w9", r"F:\github\Chronos", false),
+                sample_pane("w9", r"F:\github\QuickPane", true),
+            ],
+            error: None,
+        };
+
+        let report = SyncHerdrWorkspaces::new(&repository, &host)
+            .execute()
+            .await
+            .unwrap();
+
+        assert_eq!(report.bound.len(), 2);
+        assert_eq!(report.skipped, 0);
+        assert_eq!(repository.workspace_count().await, 2);
+        let listed = repository.list().await.unwrap();
+        let code = listed
+            .iter()
+            .find(|workspace| workspace.herdr_workspace_id.as_str() == "wD")
+            .unwrap();
+        let other = listed
+            .iter()
+            .find(|workspace| workspace.herdr_workspace_id.as_str() == "w9")
+            .unwrap();
+        assert_eq!(code.label, "code");
+        assert_eq!(code.cwd, PathBuf::from(r"D:\Code\huajingweb"));
+        assert_eq!(other.label, "other");
+        assert_eq!(other.cwd, PathBuf::from(r"F:\github\QuickPane"));
+    }
+
+    #[tokio::test]
+    async fn syncing_the_same_herdr_workspaces_again_reuses_existing_bindings() {
+        let repository = InMemoryWorkspaceRepository::default();
+        let host = FakeHerdrHost {
+            workspaces: vec![sample_host_workspace("wD", "code")],
+            panes: vec![sample_pane("wD", r"D:\Code\huajingweb", true)],
+            error: None,
+        };
+        let use_case = SyncHerdrWorkspaces::new(&repository, &host);
+        let first = use_case.execute().await.unwrap();
+        let second = use_case.execute().await.unwrap();
+
+        assert_eq!(first.bound[0].workspace_id, second.bound[0].workspace_id);
+        assert_eq!(repository.workspace_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn syncing_skips_workspaces_without_a_usable_cwd() {
+        let repository = InMemoryWorkspaceRepository::default();
+        let host = FakeHerdrHost {
+            workspaces: vec![
+                sample_host_workspace("wD", "code"),
+                sample_host_workspace("wH", "empty"),
+            ],
+            panes: vec![sample_pane("wD", r"D:\Code\huajingweb", true)],
+            error: None,
+        };
+
+        let report = SyncHerdrWorkspaces::new(&repository, &host)
+            .execute()
+            .await
+            .unwrap();
+
+        assert_eq!(report.bound.len(), 1);
+        assert_eq!(report.skipped, 1);
+        assert_eq!(repository.workspace_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn syncing_skips_invalid_cwd_and_still_binds_the_rest() {
+        let repository = InMemoryWorkspaceRepository::default();
+        let host = FakeHerdrHost {
+            workspaces: vec![
+                sample_host_workspace("bad", "unc"),
+                sample_host_workspace("wD", "code"),
+            ],
+            panes: vec![
+                sample_pane("bad", r"\\nas\share", true),
+                sample_pane("wD", r"D:\Code\huajingweb", true),
+            ],
+            error: None,
+        };
+
+        let report = SyncHerdrWorkspaces::new(&repository, &host)
+            .execute()
+            .await
+            .unwrap();
+
+        assert_eq!(report.bound.len(), 1);
+        assert_eq!(report.skipped, 1);
+        assert_eq!(report.bound[0].herdr_workspace_id.as_str(), "wD");
+    }
+
+    #[tokio::test]
+    async fn syncing_falls_back_to_worktree_checkout_when_panes_have_no_cwd() {
+        let repository = InMemoryWorkspaceRepository::default();
+        let host = FakeHerdrHost {
+            workspaces: vec![HerdrWorkspaceInfo {
+                workspace_id: "wT".into(),
+                label: "tree".into(),
+                worktree_checkout_path: Some(PathBuf::from(r"C:\projects\siftmark")),
+            }],
+            panes: vec![HerdrPaneInfo {
+                workspace_id: "wT".into(),
+                cwd: None,
+                focused: true,
+            }],
+            error: None,
+        };
+
+        let report = SyncHerdrWorkspaces::new(&repository, &host)
+            .execute()
+            .await
+            .unwrap();
+
+        assert_eq!(report.bound.len(), 1);
+        assert_eq!(report.bound[0].cwd, PathBuf::from(r"C:\projects\siftmark"));
+    }
+
+    #[tokio::test]
+    async fn host_failure_leaves_the_repository_unchanged() {
+        let repository = InMemoryWorkspaceRepository::default();
+        let host = FakeHerdrHost {
+            error: Some(HerdrHostError::unavailable("herdr not running")),
+            ..FakeHerdrHost::default()
+        };
+
+        let error = SyncHerdrWorkspaces::new(&repository, &host)
+            .execute()
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, super::ApplicationError::Herdr(_)));
+        assert_eq!(repository.workspace_count().await, 0);
     }
 }

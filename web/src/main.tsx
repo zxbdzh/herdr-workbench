@@ -95,7 +95,7 @@ function App() {
       <section className="section-heading"><div><p className="eyebrow">WORKSPACE REGISTRY</p><h2>已绑定工作区</h2></div><span className="count">{workspaces?.length ?? 0} 个</span></section>
       <section className="workspace-list" aria-live="polite">
         {workspaces === null && <div className="empty">正在读取 workspace 状态...</div>}
-        {workspaces?.length === 0 && <div className="empty"><span className="empty-mark">/</span><strong>还没有绑定工作区</strong><p>从 Herdr plugin action 打开 Workbench 后，workspace 会显示在这里。</p></div>}
+        {workspaces?.length === 0 && <div className="empty"><span className="empty-mark">/</span><strong>还没有绑定工作区</strong><p>启动时会从本机 Herdr 同步 workspace。Herdr 没在跑时，这里会是空的。</p></div>}
         {workspaces?.map((workspace) => {
           const preview = previews[workspace.workspace_id];
           return <article className="workspace" key={workspace.workspace_id}>

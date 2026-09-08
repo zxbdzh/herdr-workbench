@@ -1,0 +1,179 @@
+use std::{
+    path::{Path, PathBuf},
+    process::Stdio,
+};
+
+use async_trait::async_trait;
+use herdr_workbench_app_core::{HerdrHost, HerdrHostError, HerdrPaneInfo, HerdrWorkspaceInfo};
+use serde::Deserialize;
+use tokio::process::Command;
+
+pub struct HerdrCliHost {
+    binary: PathBuf,
+}
+
+impl HerdrCliHost {
+    pub fn from_env() -> Self {
+        let binary = std::env::var_os("HERDR_BIN_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("herdr"));
+        Self { binary }
+    }
+
+    pub fn new(binary: PathBuf) -> Self {
+        Self { binary }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CliEnvelope<T> {
+    result: T,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceListResult {
+    workspaces: Vec<CliWorkspace>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CliWorkspace {
+    workspace_id: String,
+    label: String,
+    #[serde(default)]
+    worktree: Option<CliWorktree>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CliWorktree {
+    checkout_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaneListResult {
+    panes: Vec<CliPane>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CliPane {
+    workspace_id: String,
+    cwd: Option<String>,
+    #[serde(default)]
+    focused: bool,
+}
+
+pub fn parse_workspace_list(stdout: &str) -> Result<Vec<HerdrWorkspaceInfo>, HerdrHostError> {
+    let envelope: CliEnvelope<WorkspaceListResult> =
+        serde_json::from_str(stdout).map_err(|error| {
+            HerdrHostError::unavailable(format!("invalid herdr workspace list JSON: {error}"))
+        })?;
+    Ok(envelope
+        .result
+        .workspaces
+        .into_iter()
+        .map(|workspace| HerdrWorkspaceInfo {
+            workspace_id: workspace.workspace_id,
+            label: workspace.label,
+            worktree_checkout_path: workspace
+                .worktree
+                .and_then(|worktree| worktree.checkout_path)
+                .map(PathBuf::from),
+        })
+        .collect())
+}
+
+pub fn parse_pane_list(stdout: &str) -> Result<Vec<HerdrPaneInfo>, HerdrHostError> {
+    let envelope: CliEnvelope<PaneListResult> = serde_json::from_str(stdout).map_err(|error| {
+        HerdrHostError::unavailable(format!("invalid herdr pane list JSON: {error}"))
+    })?;
+    Ok(envelope
+        .result
+        .panes
+        .into_iter()
+        .map(|pane| HerdrPaneInfo {
+            workspace_id: pane.workspace_id,
+            cwd: pane
+                .cwd
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
+            focused: pane.focused,
+        })
+        .collect())
+}
+
+async fn run_herdr(binary: &Path, args: &[&str]) -> Result<String, HerdrHostError> {
+    let output = Command::new(binary)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|error| {
+            HerdrHostError::unavailable(format!("failed to spawn {}: {error}", binary.display()))
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(HerdrHostError::unavailable(format!(
+            "herdr {} failed: {}",
+            args.join(" "),
+            stderr.trim()
+        )));
+    }
+    String::from_utf8(output.stdout).map_err(|error| {
+        HerdrHostError::unavailable(format!("herdr stdout was not UTF-8: {error}"))
+    })
+}
+
+#[async_trait]
+impl HerdrHost for HerdrCliHost {
+    async fn list_workspaces(&self) -> Result<Vec<HerdrWorkspaceInfo>, HerdrHostError> {
+        let stdout = run_herdr(&self.binary, &["workspace", "list"]).await?;
+        parse_workspace_list(&stdout)
+    }
+
+    async fn list_panes(&self) -> Result<Vec<HerdrPaneInfo>, HerdrHostError> {
+        let stdout = run_herdr(&self.binary, &["pane", "list"]).await?;
+        parse_pane_list(&stdout)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_pane_list, parse_workspace_list};
+    use std::path::PathBuf;
+
+    #[test]
+    fn parse_workspace_list_reads_cli_envelope() {
+        let stdout = r#"{"id":"cli:workspace:list","result":{"type":"workspace_list","workspaces":[{"active_tab_id":"wD:t1","agent_status":"idle","focused":true,"label":"code","number":1,"pane_count":1,"tab_count":1,"workspace_id":"wD"},{"workspace_id":"wT","label":"tree","worktree":{"checkout_path":"C:\\projects\\siftmark"}}]}}"#;
+        let workspaces = parse_workspace_list(stdout).unwrap();
+        assert_eq!(workspaces.len(), 2);
+        assert_eq!(workspaces[0].workspace_id, "wD");
+        assert_eq!(workspaces[0].label, "code");
+        assert_eq!(workspaces[0].worktree_checkout_path, None);
+        assert_eq!(
+            workspaces[1].worktree_checkout_path,
+            Some(PathBuf::from(r"C:\projects\siftmark"))
+        );
+    }
+
+    #[test]
+    fn parse_pane_list_reads_cwd_and_focus() {
+        let stdout = r#"{"id":"cli:pane:list","result":{"type":"pane_list","panes":[{"workspace_id":"wD","cwd":"D:\\Code\\huajingweb","focused":false},{"workspace_id":"w9","cwd":"F:\\github\\QuickPane","focused":true}]}}"#;
+        let panes = parse_pane_list(stdout).unwrap();
+        assert_eq!(panes.len(), 2);
+        assert_eq!(panes[0].cwd, Some(PathBuf::from(r"D:\Code\huajingweb")));
+        assert!(!panes[0].focused);
+        assert_eq!(panes[1].cwd, Some(PathBuf::from(r"F:\github\QuickPane")));
+        assert!(panes[1].focused);
+    }
+
+    #[test]
+    fn parse_workspace_list_rejects_a_bare_array() {
+        let error = parse_workspace_list(r#"[{"workspace_id":"wD"}]"#).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("invalid herdr workspace list JSON")
+        );
+    }
+}
