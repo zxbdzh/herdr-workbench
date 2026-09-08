@@ -336,6 +336,7 @@ mod tests {
     use super::{
         BindWorkspace, EventBus, HerdrWorkspaceContext, InMemoryPreviewRepository,
         InMemoryWorkspaceRepository, OpenPreview, PreviewAdapter, PreviewError,
+        PreviewStateUpdater,
     };
     use async_trait::async_trait;
     use herdr_workbench_domain::{EventPayload, EventType, PreviewSession};
@@ -449,5 +450,55 @@ mod tests {
 
         assert_ne!(first.workspace_id, second.workspace_id);
         assert_eq!(repository.workspace_count().await, 2);
+    }
+
+    #[tokio::test]
+    async fn updating_status_preserves_existing_url_and_title() {
+        let workspaces = InMemoryWorkspaceRepository::default();
+        let workspace = BindWorkspace::new(&workspaces)
+            .execute(
+                HerdrWorkspaceContext::new(
+                    "herdr-workspace-1",
+                    "Siftmark",
+                    PathBuf::from(r"C:\projects\siftmark"),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let previews = InMemoryPreviewRepository::default();
+        let events = EventBus::new(16);
+        OpenPreview::new(&previews, &FakePreviewAdapter, &events)
+            .execute(&workspace, Some("http://localhost:3000".into()))
+            .await
+            .unwrap();
+
+        previews
+            .update_preview_state(
+                &workspace.workspace_id,
+                herdr_workbench_domain::PreviewStatus::Open,
+                Some("http://localhost:3000/app".into()),
+                Some("App".into()),
+            )
+            .await
+            .unwrap();
+
+        let closed = previews
+            .update_preview_state(
+                &workspace.workspace_id,
+                herdr_workbench_domain::PreviewStatus::Unavailable,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            closed.status,
+            herdr_workbench_domain::PreviewStatus::Unavailable
+        );
+        assert_eq!(closed.url.as_deref(), Some("http://localhost:3000/app"));
+        assert_eq!(closed.title.as_deref(), Some("App"));
+        assert_eq!(previews.revision(&workspace.workspace_id).await, 1);
     }
 }
