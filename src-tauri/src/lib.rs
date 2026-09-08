@@ -115,6 +115,51 @@ impl TauriWebViewPreviewAdapter {
             }
         });
     }
+
+    async fn apply_open_plan(
+        &self,
+        workspace: &Workspace,
+        window: &tauri::WebviewWindow,
+        plan: PreviewOpenPlan,
+    ) {
+        if plan.clear_diagnostics {
+            self.diagnostics.clear(&workspace.workspace_id).await;
+        }
+        if plan.observe_close {
+            Self::observe_window_close(
+                window,
+                Arc::clone(&self.state),
+                Arc::clone(&self.diagnostics),
+            );
+        }
+        if plan.attach_diagnostics {
+            Self::observe_diagnostics(window, Arc::clone(&self.diagnostics));
+        }
+    }
+}
+
+struct PreviewOpenPlan {
+    clear_diagnostics: bool,
+    attach_diagnostics: bool,
+    observe_close: bool,
+}
+
+impl PreviewOpenPlan {
+    fn reuse() -> Self {
+        Self {
+            clear_diagnostics: true,
+            attach_diagnostics: false,
+            observe_close: false,
+        }
+    }
+
+    fn create() -> Self {
+        Self {
+            clear_diagnostics: false,
+            attach_diagnostics: true,
+            observe_close: true,
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -128,6 +173,8 @@ impl herdr_workbench_app_core::PreviewAdapter for TauriWebViewPreviewAdapter {
         let label = Self::window_label(workspace);
 
         if let Some(window) = self.app.get_webview_window(&label) {
+            self.apply_open_plan(workspace, &window, PreviewOpenPlan::reuse())
+                .await;
             window
                 .show()
                 .and_then(|_| window.set_focus())
@@ -137,12 +184,6 @@ impl herdr_workbench_app_core::PreviewAdapter for TauriWebViewPreviewAdapter {
                         "failed to focus preview window: {error}"
                     ))
                 })?;
-            Self::observe_window_close(
-                &window,
-                Arc::clone(&self.state),
-                Arc::clone(&self.diagnostics),
-            );
-            Self::observe_diagnostics(&window, Arc::clone(&self.diagnostics));
         } else {
             let state_started = Arc::clone(&self.state);
             let state_title = Arc::clone(&self.state);
@@ -180,12 +221,8 @@ impl herdr_workbench_app_core::PreviewAdapter for TauriWebViewPreviewAdapter {
                             "failed to create preview window: {error}"
                         ))
                     })?;
-            Self::observe_window_close(
-                &window,
-                Arc::clone(&self.state),
-                Arc::clone(&self.diagnostics),
-            );
-            Self::observe_diagnostics(&window, Arc::clone(&self.diagnostics));
+            self.apply_open_plan(workspace, &window, PreviewOpenPlan::create())
+                .await;
         }
 
         Ok(PreviewSession::opening(workspace, Some(target.to_string())).mark_open())
@@ -687,6 +724,22 @@ mod tests {
             TauriWebViewPreviewAdapter::workspace_id_from_label("preview-not-a-uuid"),
             None
         );
+    }
+
+    #[test]
+    fn reusing_an_open_preview_window_clears_diagnostics_and_keeps_existing_listeners() {
+        let plan = PreviewOpenPlan::reuse();
+        assert!(plan.clear_diagnostics);
+        assert!(!plan.attach_diagnostics);
+        assert!(!plan.observe_close);
+    }
+
+    #[test]
+    fn creating_a_preview_window_attaches_diagnostics_once() {
+        let plan = PreviewOpenPlan::create();
+        assert!(!plan.clear_diagnostics);
+        assert!(plan.attach_diagnostics);
+        assert!(plan.observe_close);
     }
 
     #[test]
