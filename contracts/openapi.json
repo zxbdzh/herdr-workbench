@@ -48,6 +48,45 @@
         }
       }
     },
+    "/api/v1/workspaces/{id}/preview/diagnostics": {
+      "get": {
+        "tags": [],
+        "operationId": "get_preview_diagnostics",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Workbench workspace ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewDiagnosticsResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/workspaces/{id}/preview/open": {
       "post": {
         "tags": [],
@@ -268,6 +307,57 @@
         "properties": {
           "status": {
             "type": "string"
+          }
+        }
+      },
+      "PreviewDiagnosticDto": {
+        "type": "object",
+        "required": [
+          "kind",
+          "level",
+          "message",
+          "occurred_at"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "level": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "occurred_at": {
+            "type": "string"
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "PreviewDiagnosticsResponse": {
+        "type": "object",
+        "required": [
+          "diagnostics"
+        ],
+        "properties": {
+          "diagnostics": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PreviewDiagnosticDto"
+            }
           }
         }
       },

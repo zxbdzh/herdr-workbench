@@ -20,4 +20,5 @@ rust-embed = "8"
 uuid.workspace = true
 
 [dev-dependencies]
+chrono.workspace = true
 tower = "0.5"

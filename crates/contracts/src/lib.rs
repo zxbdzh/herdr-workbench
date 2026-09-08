@@ -85,6 +85,41 @@ impl From<herdr_workbench_domain::PreviewScreenshot> for PreviewScreenshotRespon
 }
 
 #[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct PreviewDiagnosticDto {
+    pub kind: String,
+    pub level: String,
+    pub message: String,
+    pub source: Option<String>,
+    pub status: Option<u16>,
+    pub occurred_at: String,
+}
+
+impl From<herdr_workbench_domain::PreviewDiagnostic> for PreviewDiagnosticDto {
+    fn from(diagnostic: herdr_workbench_domain::PreviewDiagnostic) -> Self {
+        Self {
+            kind: match diagnostic.kind {
+                herdr_workbench_domain::PreviewDiagnosticKind::Console => "console".into(),
+                herdr_workbench_domain::PreviewDiagnosticKind::Exception => "exception".into(),
+                herdr_workbench_domain::PreviewDiagnosticKind::Network => "network".into(),
+            },
+            level: match diagnostic.level {
+                herdr_workbench_domain::PreviewDiagnosticLevel::Warning => "warning".into(),
+                herdr_workbench_domain::PreviewDiagnosticLevel::Error => "error".into(),
+            },
+            message: diagnostic.message,
+            source: diagnostic.source,
+            status: diagnostic.status,
+            occurred_at: diagnostic.occurred_at.to_rfc3339(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct PreviewDiagnosticsResponse {
+    pub diagnostics: Vec<PreviewDiagnosticDto>,
+}
+
+#[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct ErrorResponse {
     pub error: ErrorBody,
 }
@@ -98,10 +133,10 @@ pub struct ErrorBody {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(health, list_workspaces, get_workspace_state, open_preview, capture_preview_screenshot, get_preview_screenshot),
+    paths(health, list_workspaces, get_workspace_state, open_preview, capture_preview_screenshot, get_preview_screenshot, get_preview_diagnostics),
     components(schemas(
         HealthResponse, WorkspaceDto, WorkspaceListResponse, PreviewOpenRequest,
-        PreviewStateResponse, PreviewScreenshotResponse, ErrorResponse, ErrorBody
+        PreviewStateResponse, PreviewScreenshotResponse, PreviewDiagnosticDto, PreviewDiagnosticsResponse, ErrorResponse, ErrorBody
     )),
     tags((name = "system", description = "Workbench system endpoints"))
 )]
@@ -145,3 +180,11 @@ pub fn capture_preview_screenshot() {}
     responses((status = 200), (status = 404, body = ErrorResponse))
 )]
 pub fn get_preview_screenshot() {}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{id}/preview/diagnostics",
+    params(("id" = String, Path, description = "Workbench workspace ID")),
+    responses((status = 200, body = PreviewDiagnosticsResponse), (status = 404, body = ErrorResponse))
+)]
+pub fn get_preview_diagnostics() {}

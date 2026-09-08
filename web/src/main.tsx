@@ -6,6 +6,8 @@ interface HealthResponse { status: string; }
 interface Workspace { workspace_id: string; herdr_workspace_id: string; label: string; cwd: string; revision: number; }
 interface WorkspaceListResponse { workspaces: Workspace[]; }
 interface PreviewState { preview_session_id: string | null; preview_url: string | null; preview_status: string | null; }
+interface PreviewDiagnostic { kind: string; level: string; message: string; source: string | null; status: number | null; occurred_at: string; }
+interface PreviewDiagnosticsResponse { diagnostics: PreviewDiagnostic[]; }
 interface ApiError { error?: { code?: string; message?: string }; }
 
 const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
@@ -23,6 +25,7 @@ function App() {
   const [opening, setOpening] = useState<string | null>(null);
   const [capturing, setCapturing] = useState<string | null>(null);
   const [shots, setShots] = useState<Record<string, string>>({});
+  const [diagnostics, setDiagnostics] = useState<Record<string, PreviewDiagnostic[]>>({});
 
   useEffect(() => {
     Promise.all([api<HealthResponse>("/api/v1/health"), api<WorkspaceListResponse>("/api/v1/workspaces")])
@@ -67,6 +70,16 @@ function App() {
     } finally { setCapturing(null); }
   };
 
+  const loadDiagnostics = async (workspace: Workspace) => {
+    setError(null);
+    try {
+      const response = await api<PreviewDiagnosticsResponse>(`/api/v1/workspaces/${workspace.workspace_id}/preview/diagnostics`);
+      setDiagnostics((current) => ({ ...current, [workspace.workspace_id]: response.diagnostics }));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "无法读取 Preview 诊断");
+    }
+  };
+
   return (
     <main className="shell">
       <header className="topbar">
@@ -89,7 +102,9 @@ function App() {
             <div className="workspace-index">W</div><div className="workspace-main"><h3>{workspace.label}</h3><code>{workspace.cwd}</code><span className="workspace-id">Herdr · {workspace.herdr_workspace_id}</span>{preview && <span className="preview-state">Preview · {preview.preview_status ?? "未打开"}{preview.preview_url ? ` · ${preview.preview_url}` : ""}</span>}</div>
             <button className="preview-button" type="button" onClick={() => openPreview(workspace)} disabled={opening === workspace.workspace_id}>{opening === workspace.workspace_id ? "打开中..." : "查看 Preview"}</button>
             <button className="preview-button" type="button" onClick={() => captureScreenshot(workspace)} disabled={capturing === workspace.workspace_id}>{capturing === workspace.workspace_id ? "截图中..." : "截图"}</button>
-            {shots[workspace.workspace_id] && <img className="preview-shot" alt={`${workspace.label} preview`} src={shots[workspace.workspace_id]} />}<div className="revision">REV {workspace.revision}</div>
+            <button className="preview-button" type="button" onClick={() => loadDiagnostics(workspace)}>诊断</button>
+            {shots[workspace.workspace_id] && <img className="preview-shot" alt={`${workspace.label} preview`} src={shots[workspace.workspace_id]} />}
+            {diagnostics[workspace.workspace_id]?.length ? <ul className="preview-diagnostics">{diagnostics[workspace.workspace_id].map((item, index) => <li key={`${item.occurred_at}-${index}`}>{item.level} · {item.kind} · {item.message}</li>)}</ul> : null}<div className="revision">REV {workspace.revision}</div>
           </article>;
         })}
       </section>

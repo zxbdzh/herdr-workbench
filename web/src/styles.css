@@ -35,6 +35,7 @@ h2 { margin-bottom: 0; font-size: 24px; }
 .preview-button:hover:not(:disabled) { background: #123126; }
 .preview-button:disabled { cursor: wait; opacity: .6; }
 .preview-shot { width: 160px; height: 90px; object-fit: cover; border: 1px solid #27313d; background: #0d1218; }
+.preview-diagnostics { margin: 0; padding-left: 18px; color: #ff9e9e; font: 12px Consolas, monospace; max-width: 280px; }
 .empty { display: grid; place-items: center; gap: 10px; min-height: 190px; border-bottom: 1px solid #1e2731; color: #9aa7b5; text-align: center; }
 .empty-mark { color: #55d68a; font: 40px Consolas, monospace; }
 .empty strong { color: #e6edf3; }
