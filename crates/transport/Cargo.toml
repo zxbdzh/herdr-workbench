@@ -7,7 +7,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 herdr-workbench-app-core = { path = "../app-core" }
 herdr-workbench-contracts = { path = "../contracts" }
 herdr-workbench-domain = { path = "../domain" }
@@ -22,3 +22,5 @@ uuid.workspace = true
 [dev-dependencies]
 chrono.workspace = true
 tower = "0.5"
+tokio-tungstenite = "0.29"
+futures-util = "0.3"

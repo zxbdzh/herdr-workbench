@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use utoipa::{OpenApi, ToSchema};
 
 #[derive(Clone, Debug, Serialize, ToSchema)]
@@ -120,6 +121,49 @@ pub struct PreviewDiagnosticsResponse {
 }
 
 #[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct WorkspaceEventEnvelope {
+    pub event_id: String,
+    pub event_type: String,
+    pub workspace_id: String,
+    pub occurred_at: String,
+    pub revision: u64,
+    pub payload: Value,
+}
+
+impl WorkspaceEventEnvelope {
+    pub fn snapshot(state: PreviewStateResponse) -> Self {
+        Self {
+            event_id: uuid::Uuid::now_v7().to_string(),
+            event_type: "workspace.snapshot".into(),
+            workspace_id: state.workspace.workspace_id.clone(),
+            occurred_at: chrono::Utc::now().to_rfc3339(),
+            revision: state.workspace.revision,
+            payload: serde_json::to_value(&state).unwrap_or(Value::Null),
+        }
+    }
+
+    pub fn from_app_event(event: herdr_workbench_domain::AppEvent) -> Self {
+        let event_type = match event.event_type {
+            herdr_workbench_domain::EventType::PreviewOpened => "preview.opened",
+            herdr_workbench_domain::EventType::PreviewScreenshotCaptured => {
+                "preview.screenshot_captured"
+            }
+            herdr_workbench_domain::EventType::PreviewDiagnosticsUpdated => {
+                "preview.diagnostics_updated"
+            }
+        };
+        Self {
+            event_id: event.event_id.to_string(),
+            event_type: event_type.into(),
+            workspace_id: event.workspace_id.as_uuid().to_string(),
+            occurred_at: event.occurred_at.to_rfc3339(),
+            revision: event.revision,
+            payload: serde_json::to_value(&event.payload).unwrap_or(Value::Null),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct ErrorResponse {
     pub error: ErrorBody,
 }
@@ -133,10 +177,10 @@ pub struct ErrorBody {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(health, list_workspaces, get_workspace_state, open_preview, capture_preview_screenshot, get_preview_screenshot, get_preview_diagnostics),
+    paths(health, list_workspaces, get_workspace_state, open_preview, capture_preview_screenshot, get_preview_screenshot, get_preview_diagnostics, workspace_events),
     components(schemas(
         HealthResponse, WorkspaceDto, WorkspaceListResponse, PreviewOpenRequest,
-        PreviewStateResponse, PreviewScreenshotResponse, PreviewDiagnosticDto, PreviewDiagnosticsResponse, ErrorResponse, ErrorBody
+        PreviewStateResponse, PreviewScreenshotResponse, PreviewDiagnosticDto, PreviewDiagnosticsResponse, WorkspaceEventEnvelope, ErrorResponse, ErrorBody
     )),
     tags((name = "system", description = "Workbench system endpoints"))
 )]
@@ -188,3 +232,11 @@ pub fn get_preview_screenshot() {}
     responses((status = 200, body = PreviewDiagnosticsResponse), (status = 404, body = ErrorResponse))
 )]
 pub fn get_preview_diagnostics() {}
+
+#[utoipa::path(
+    get,
+    path = "/ws/v1/workspaces/{id}",
+    params(("id" = String, Path, description = "Workbench workspace ID")),
+    responses((status = 101), (status = 404, body = ErrorResponse))
+)]
+pub fn workspace_events() {}

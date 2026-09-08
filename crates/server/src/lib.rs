@@ -2,7 +2,7 @@ use std::{env, fs, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use herdr_workbench_adapters_sqlite::{FilesystemScreenshotStore, SqliteWorkspaceRepository};
 use herdr_workbench_app_core::{
-    EventBus, InMemoryPreviewDiagnostics, PreviewAdapter, PreviewDiagnosticsSink,
+    EventBus, EventPublisher, InMemoryPreviewDiagnostics, PreviewAdapter, PreviewDiagnosticsSink,
 };
 use herdr_workbench_transport::{AppState, router};
 use thiserror::Error;
@@ -56,28 +56,35 @@ fn screenshot_store() -> Arc<FilesystemScreenshotStore> {
     Arc::new(FilesystemScreenshotStore::new(data_dir))
 }
 
+pub fn shared_event_bus() -> Arc<EventBus> {
+    Arc::new(EventBus::new(256))
+}
+
+pub fn diagnostics_with_bus(events: Arc<EventBus>) -> Arc<dyn PreviewDiagnosticsSink> {
+    Arc::new(InMemoryPreviewDiagnostics::with_publisher(
+        events as Arc<dyn EventPublisher>,
+    ))
+}
+
 pub async fn serve<A>(preview_adapter: Arc<A>) -> Result<(), ServerError>
 where
     A: PreviewAdapter + 'static,
 {
     let repository = connect_repository().await?;
-    serve_with_repository(
-        repository,
-        preview_adapter,
-        Arc::new(InMemoryPreviewDiagnostics::default()),
-    )
-    .await
+    let events = shared_event_bus();
+    let diagnostics = diagnostics_with_bus(Arc::clone(&events));
+    serve_with_repository(repository, preview_adapter, diagnostics, events).await
 }
 
 pub async fn serve_with_repository<A>(
     repository: Arc<SqliteWorkspaceRepository>,
     preview_adapter: Arc<A>,
     diagnostics: Arc<dyn PreviewDiagnosticsSink>,
+    events: Arc<EventBus>,
 ) -> Result<(), ServerError>
 where
     A: PreviewAdapter + 'static,
 {
-    let events = Arc::new(EventBus::new(256));
     let address: SocketAddr = DEFAULT_ADDRESS.parse().expect("valid localhost address");
     let listener = tokio::net::TcpListener::bind(address)
         .await

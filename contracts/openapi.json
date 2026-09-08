@@ -263,6 +263,38 @@
           }
         }
       }
+    },
+    "/ws/v1/workspaces/{id}": {
+      "get": {
+        "tags": [],
+        "operationId": "workspace_events",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Workbench workspace ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": ""
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -461,6 +493,37 @@
           "label": {
             "type": "string"
           },
+          "revision": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "workspace_id": {
+            "type": "string"
+          }
+        }
+      },
+      "WorkspaceEventEnvelope": {
+        "type": "object",
+        "required": [
+          "event_id",
+          "event_type",
+          "workspace_id",
+          "occurred_at",
+          "revision",
+          "payload"
+        ],
+        "properties": {
+          "event_id": {
+            "type": "string"
+          },
+          "event_type": {
+            "type": "string"
+          },
+          "occurred_at": {
+            "type": "string"
+          },
+          "payload": {},
           "revision": {
             "type": "integer",
             "format": "int64",

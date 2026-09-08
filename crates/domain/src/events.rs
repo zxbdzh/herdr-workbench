@@ -2,12 +2,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{PreviewSession, WorkbenchWorkspaceId};
+use crate::{PreviewDiagnostic, PreviewSession, WorkbenchWorkspaceId};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EventType {
     PreviewOpened,
     PreviewScreenshotCaptured,
+    PreviewDiagnosticsUpdated,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,9 +22,15 @@ pub struct PreviewScreenshotCaptured {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewDiagnosticsUpdated {
+    pub diagnostic: PreviewDiagnostic,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EventPayload {
     PreviewOpened(PreviewOpened),
     PreviewScreenshotCaptured(PreviewScreenshotCaptured),
+    PreviewDiagnosticsUpdated(PreviewDiagnosticsUpdated),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +67,19 @@ impl AppEvent {
             revision,
             payload: EventPayload::PreviewScreenshotCaptured(PreviewScreenshotCaptured {
                 screenshot,
+            }),
+        }
+    }
+
+    pub fn preview_diagnostics_updated(diagnostic: PreviewDiagnostic) -> Self {
+        Self {
+            event_id: Uuid::now_v7(),
+            event_type: EventType::PreviewDiagnosticsUpdated,
+            workspace_id: diagnostic.workspace_id.clone(),
+            occurred_at: Utc::now(),
+            revision: 0,
+            payload: EventPayload::PreviewDiagnosticsUpdated(PreviewDiagnosticsUpdated {
+                diagnostic,
             }),
         }
     }
