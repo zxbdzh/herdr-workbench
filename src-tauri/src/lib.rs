@@ -9,7 +9,7 @@ use herdr_workbench_domain::{
 };
 use herdr_workbench_server::{
     connect_repository, diagnostics_with_bus, serve_with_repository, shared_event_bus,
-    sync_herdr_workspaces,
+    spawn_herdr_reconcile, sync_herdr_workspaces,
 };
 use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
@@ -644,6 +644,7 @@ pub fn run() {
                 match connect_repository().await {
                     Ok(repository) => {
                         sync_herdr_workspaces(repository.as_ref()).await;
+                        spawn_herdr_reconcile(Arc::clone(&repository));
                         let state: Arc<dyn PreviewStateUpdater> = repository.clone();
                         let events = shared_event_bus();
                         let diagnostics = diagnostics_with_bus(Arc::clone(&events));

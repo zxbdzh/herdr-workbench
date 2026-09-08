@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use herdr_workbench_domain::{
@@ -138,16 +138,89 @@ fn derive_workspace_context(
         .iter()
         .filter(|pane| pane.workspace_id == workspace.workspace_id)
         .collect();
-    let focused_cwd = owned
-        .iter()
-        .find(|pane| pane.focused)
-        .and_then(|pane| pane.cwd.clone());
-    let first_cwd = owned.iter().find_map(|pane| pane.cwd.clone());
-    let cwd = focused_cwd
-        .or(first_cwd)
-        .or_else(|| workspace.worktree_checkout_path.clone())
-        .ok_or(DomainError::WorkspaceRootMustBeAbsolute)?;
-    HerdrWorkspaceContext::new(&workspace.workspace_id, &workspace.label, cwd)
+    if let Some(context) = owned.iter().find(|pane| pane.focused).and_then(|pane| {
+        bindable_context(&workspace.workspace_id, &workspace.label, pane.cwd.clone())
+    }) {
+        return Ok(context);
+    }
+    if let Some(context) = owned.iter().find_map(|pane| {
+        bindable_context(&workspace.workspace_id, &workspace.label, pane.cwd.clone())
+    }) {
+        return Ok(context);
+    }
+    bindable_context(
+        &workspace.workspace_id,
+        &workspace.label,
+        workspace.worktree_checkout_path.clone(),
+    )
+    .ok_or(DomainError::WorkspaceRootMustBeAbsolute)
+}
+
+fn bindable_context(
+    workspace_id: &str,
+    label: &str,
+    cwd: Option<PathBuf>,
+) -> Option<HerdrWorkspaceContext> {
+    cwd.and_then(|cwd| HerdrWorkspaceContext::new(workspace_id, label, cwd).ok())
+}
+
+pub const HERDR_RECONCILE_OK_INTERVAL: Duration = Duration::from_secs(30);
+pub const HERDR_RECONCILE_BACKOFF_INTERVAL: Duration = Duration::from_secs(120);
+
+#[async_trait]
+pub trait ReconcileSleeper: Send + Sync {
+    async fn sleep(&self, duration: Duration);
+}
+
+pub struct TokioReconcileSleeper;
+
+#[async_trait]
+impl ReconcileSleeper for TokioReconcileSleeper {
+    async fn sleep(&self, duration: Duration) {
+        tokio::time::sleep(duration).await;
+    }
+}
+
+pub struct HerdrReconcileLoop<R, H, S> {
+    repository: Arc<R>,
+    host: H,
+    sleeper: S,
+}
+
+impl<R, H, S> HerdrReconcileLoop<R, H, S>
+where
+    R: WorkspaceRepository,
+    H: HerdrHost,
+    S: ReconcileSleeper,
+{
+    pub fn new(repository: Arc<R>, host: H, sleeper: S) -> Self {
+        Self {
+            repository,
+            host,
+            sleeper,
+        }
+    }
+
+    pub async fn step(&self) -> Duration {
+        let interval = match SyncHerdrWorkspaces::new(self.repository.as_ref(), &self.host)
+            .execute()
+            .await
+        {
+            Ok(_) => HERDR_RECONCILE_OK_INTERVAL,
+            Err(error) => {
+                eprintln!("Herdr workspace reconcile skipped: {error}");
+                HERDR_RECONCILE_BACKOFF_INTERVAL
+            }
+        };
+        self.sleeper.sleep(interval).await;
+        interval
+    }
+
+    pub async fn run(&self) {
+        loop {
+            self.step().await;
+        }
+    }
 }
 
 #[async_trait]
@@ -629,15 +702,16 @@ impl PreviewError {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, sync::Arc};
+    use std::{path::PathBuf, sync::Arc, time::Duration};
 
     use super::{
-        BindWorkspace, CapturePreview, CapturedPreviewImage, EventBus, HerdrHost, HerdrHostError,
-        HerdrPaneInfo, HerdrWorkspaceContext, HerdrWorkspaceInfo, InMemoryPreviewDiagnostics,
-        InMemoryPreviewRepository, InMemoryScreenshotStore, InMemoryWorkspaceRepository,
-        OpenPreview, PreviewAdapter, PreviewDiagnosticsSink, PreviewError,
-        PreviewScreenshotRepository, PreviewStateUpdater, ScreenshotStore, SyncHerdrWorkspaces,
-        WorkspaceRepository,
+        BindWorkspace, CapturePreview, CapturedPreviewImage, EventBus,
+        HERDR_RECONCILE_BACKOFF_INTERVAL, HERDR_RECONCILE_OK_INTERVAL, HerdrHost, HerdrHostError,
+        HerdrPaneInfo, HerdrReconcileLoop, HerdrWorkspaceContext, HerdrWorkspaceInfo,
+        InMemoryPreviewDiagnostics, InMemoryPreviewRepository, InMemoryScreenshotStore,
+        InMemoryWorkspaceRepository, OpenPreview, PreviewAdapter, PreviewDiagnosticsSink,
+        PreviewError, PreviewScreenshotRepository, PreviewStateUpdater, ReconcileSleeper,
+        ScreenshotStore, SyncHerdrWorkspaces, WorkspaceRepository,
     };
     use async_trait::async_trait;
     use herdr_workbench_domain::{
@@ -1112,5 +1186,176 @@ mod tests {
 
         assert!(matches!(error, super::ApplicationError::Herdr(_)));
         assert_eq!(repository.workspace_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn syncing_skips_a_relative_cwd_and_still_binds_the_rest() {
+        let repository = InMemoryWorkspaceRepository::default();
+        let host = FakeHerdrHost {
+            workspaces: vec![
+                sample_host_workspace("rel", "relative"),
+                sample_host_workspace("wD", "code"),
+            ],
+            panes: vec![
+                sample_pane("rel", r"projects\siftmark", true),
+                sample_pane("wD", r"D:\Code\huajingweb", true),
+            ],
+            error: None,
+        };
+
+        let report = SyncHerdrWorkspaces::new(&repository, &host)
+            .execute()
+            .await
+            .unwrap();
+
+        assert_eq!(report.bound.len(), 1);
+        assert_eq!(report.skipped, 1);
+        assert_eq!(report.bound[0].herdr_workspace_id.as_str(), "wD");
+    }
+
+    #[tokio::test]
+    async fn focused_relative_cwd_falls_back_to_the_first_absolute_pane() {
+        let repository = InMemoryWorkspaceRepository::default();
+        let host = FakeHerdrHost {
+            workspaces: vec![sample_host_workspace("w9", "other")],
+            panes: vec![
+                sample_pane("w9", r"relative\path", true),
+                sample_pane("w9", r"F:\github\QuickPane", false),
+            ],
+            error: None,
+        };
+
+        let report = SyncHerdrWorkspaces::new(&repository, &host)
+            .execute()
+            .await
+            .unwrap();
+
+        assert_eq!(report.bound.len(), 1);
+        assert_eq!(report.bound[0].cwd, PathBuf::from(r"F:\github\QuickPane"));
+    }
+
+    #[tokio::test]
+    async fn relative_pane_cwd_falls_back_to_worktree_checkout() {
+        let repository = InMemoryWorkspaceRepository::default();
+        let host = FakeHerdrHost {
+            workspaces: vec![HerdrWorkspaceInfo {
+                workspace_id: "wT".into(),
+                label: "tree".into(),
+                worktree_checkout_path: Some(PathBuf::from(r"C:\projects\siftmark")),
+            }],
+            panes: vec![sample_pane("wT", r"relative\path", true)],
+            error: None,
+        };
+
+        let report = SyncHerdrWorkspaces::new(&repository, &host)
+            .execute()
+            .await
+            .unwrap();
+
+        assert_eq!(report.bound.len(), 1);
+        assert_eq!(report.bound[0].cwd, PathBuf::from(r"C:\projects\siftmark"));
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingSleeper {
+        sleeps: Arc<std::sync::Mutex<Vec<Duration>>>,
+    }
+
+    impl RecordingSleeper {
+        fn recorded(&self) -> Vec<Duration> {
+            self.sleeps.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl ReconcileSleeper for RecordingSleeper {
+        async fn sleep(&self, duration: Duration) {
+            self.sleeps.lock().unwrap().push(duration);
+        }
+    }
+
+    type HostSnapshot = Result<(Vec<HerdrWorkspaceInfo>, Vec<HerdrPaneInfo>), HerdrHostError>;
+
+    #[derive(Clone)]
+    struct SequenceHost {
+        results: Arc<std::sync::Mutex<Vec<HostSnapshot>>>,
+        current: Arc<std::sync::Mutex<Option<HostSnapshot>>>,
+    }
+
+    impl SequenceHost {
+        fn snapshot(&self) -> HostSnapshot {
+            let mut current = self.current.lock().unwrap();
+            if current.is_none() {
+                let mut results = self.results.lock().unwrap();
+                *current = Some(if results.is_empty() {
+                    Err(HerdrHostError::unavailable("no more host results"))
+                } else {
+                    results.remove(0)
+                });
+            }
+            current.clone().expect("host snapshot")
+        }
+
+        fn finish_step(&self) {
+            *self.current.lock().unwrap() = None;
+        }
+    }
+
+    #[async_trait]
+    impl HerdrHost for SequenceHost {
+        async fn list_workspaces(&self) -> Result<Vec<HerdrWorkspaceInfo>, HerdrHostError> {
+            self.snapshot().map(|(workspaces, _)| workspaces)
+        }
+
+        async fn list_panes(&self) -> Result<Vec<HerdrPaneInfo>, HerdrHostError> {
+            self.snapshot().map(|(_, panes)| panes)
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_reconcile_step_sleeps_thirty_seconds() {
+        let repository = Arc::new(InMemoryWorkspaceRepository::default());
+        let host = FakeHerdrHost {
+            workspaces: vec![sample_host_workspace("wD", "code")],
+            panes: vec![sample_pane("wD", r"D:\Code\huajingweb", true)],
+            error: None,
+        };
+        let sleeper = RecordingSleeper::default();
+        let interval = HerdrReconcileLoop::new(Arc::clone(&repository), host, sleeper.clone())
+            .step()
+            .await;
+        assert_eq!(interval, HERDR_RECONCILE_OK_INTERVAL);
+        assert_eq!(sleeper.recorded(), vec![HERDR_RECONCILE_OK_INTERVAL]);
+        assert_eq!(repository.workspace_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn failed_reconcile_step_backs_off_two_minutes_then_recovers() {
+        let repository = Arc::new(InMemoryWorkspaceRepository::default());
+        let host = SequenceHost {
+            results: Arc::new(std::sync::Mutex::new(vec![
+                Err(HerdrHostError::unavailable("herdr not running")),
+                Ok((
+                    vec![sample_host_workspace("wD", "code")],
+                    vec![sample_pane("wD", r"D:\Code\huajingweb", true)],
+                )),
+            ])),
+            current: Arc::new(std::sync::Mutex::new(None)),
+        };
+        let sleeper = RecordingSleeper::default();
+        let loop_ = HerdrReconcileLoop::new(Arc::clone(&repository), host.clone(), sleeper.clone());
+        let first = loop_.step().await;
+        host.finish_step();
+        let second = loop_.step().await;
+        assert_eq!(first, HERDR_RECONCILE_BACKOFF_INTERVAL);
+        assert_eq!(second, HERDR_RECONCILE_OK_INTERVAL);
+        assert_eq!(
+            sleeper.recorded(),
+            vec![
+                HERDR_RECONCILE_BACKOFF_INTERVAL,
+                HERDR_RECONCILE_OK_INTERVAL
+            ]
+        );
+        assert_eq!(repository.workspace_count().await, 1);
     }
 }
