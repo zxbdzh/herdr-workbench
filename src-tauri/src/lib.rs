@@ -7,7 +7,9 @@ use herdr_workbench_domain::{
     PreviewDiagnostic, PreviewDiagnosticKind, PreviewDiagnosticLevel, PreviewSession,
     PreviewStatus, WorkbenchWorkspaceId, Workspace,
 };
-use herdr_workbench_server::{connect_repository, serve_with_repository};
+use herdr_workbench_server::{
+    connect_repository, diagnostics_with_bus, serve_with_repository, shared_event_bus,
+};
 use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use url::Url;
@@ -641,16 +643,16 @@ pub fn run() {
                 match connect_repository().await {
                     Ok(repository) => {
                         let state: Arc<dyn PreviewStateUpdater> = repository.clone();
-                        let diagnostics: Arc<dyn PreviewDiagnosticsSink> = Arc::new(
-                            herdr_workbench_app_core::InMemoryPreviewDiagnostics::default(),
-                        );
+                        let events = shared_event_bus();
+                        let diagnostics = diagnostics_with_bus(Arc::clone(&events));
                         let preview_adapter = Arc::new(TauriWebViewPreviewAdapter::new(
                             handle,
                             state,
                             Arc::clone(&diagnostics),
                         ));
                         if let Err(error) =
-                            serve_with_repository(repository, preview_adapter, diagnostics).await
+                            serve_with_repository(repository, preview_adapter, diagnostics, events)
+                                .await
                         {
                             eprintln!("Workbench API stopped: {error}");
                         }

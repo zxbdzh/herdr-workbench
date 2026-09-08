@@ -114,6 +114,11 @@ pub trait PreviewStateUpdater: Send + Sync {
     ) -> Result<PreviewSession, RepositoryError>;
 }
 
+#[async_trait]
+pub trait EventPublisher: Send + Sync {
+    async fn publish(&self, event: AppEvent);
+}
+
 pub const PREVIEW_DIAGNOSTIC_LIMIT: usize = 50;
 
 #[async_trait]
@@ -126,6 +131,16 @@ pub trait PreviewDiagnosticsSink: Send + Sync {
 #[derive(Clone, Default)]
 pub struct InMemoryPreviewDiagnostics {
     entries: Arc<RwLock<HashMap<WorkbenchWorkspaceId, Vec<PreviewDiagnostic>>>>,
+    events: Option<Arc<dyn EventPublisher>>,
+}
+
+impl InMemoryPreviewDiagnostics {
+    pub fn with_publisher(events: Arc<dyn EventPublisher>) -> Self {
+        Self {
+            entries: Arc::new(RwLock::new(HashMap::new())),
+            events: Some(events),
+        }
+    }
 }
 
 #[async_trait]
@@ -133,10 +148,16 @@ impl PreviewDiagnosticsSink for InMemoryPreviewDiagnostics {
     async fn record(&self, diagnostic: PreviewDiagnostic) {
         let mut entries = self.entries.write().await;
         let buffer = entries.entry(diagnostic.workspace_id.clone()).or_default();
-        buffer.push(diagnostic);
+        buffer.push(diagnostic.clone());
         let overflow = buffer.len().saturating_sub(PREVIEW_DIAGNOSTIC_LIMIT);
         if overflow > 0 {
             buffer.drain(0..overflow);
+        }
+        drop(entries);
+        if let Some(events) = &self.events {
+            events
+                .publish(AppEvent::preview_diagnostics_updated(diagnostic))
+                .await;
         }
     }
 
@@ -164,11 +185,6 @@ pub struct DurablePreviewCommit {
 pub struct DurableScreenshotCommit {
     pub screenshot: PreviewScreenshot,
     pub event: AppEvent,
-}
-
-#[async_trait]
-pub trait EventPublisher: Send + Sync {
-    async fn publish(&self, event: AppEvent);
 }
 
 #[derive(Clone)]
@@ -518,7 +534,7 @@ impl PreviewError {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{path::PathBuf, sync::Arc};
 
     use super::{
         BindWorkspace, CapturePreview, CapturedPreviewImage, EventBus, HerdrWorkspaceContext,
@@ -790,5 +806,29 @@ mod tests {
         assert_eq!(listed.last().unwrap().message, "msg-49");
         sink.clear(&workspace.workspace_id).await;
         assert!(sink.list(&workspace.workspace_id).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recording_diagnostics_publishes_without_a_revision() {
+        let workspaces = InMemoryWorkspaceRepository::default();
+        let workspace = BindWorkspace::new(&workspaces)
+            .execute(
+                HerdrWorkspaceContext::new(
+                    "herdr-workspace-1",
+                    "Siftmark",
+                    PathBuf::from(r"C:\projects\siftmark"),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let events = EventBus::new(8);
+        let mut receiver = events.subscribe();
+        let sink = InMemoryPreviewDiagnostics::with_publisher(Arc::new(events));
+        sink.record(sample_diagnostic(&workspace, "boom")).await;
+        let event = receiver.recv().await.unwrap();
+        assert_eq!(event.event_type, EventType::PreviewDiagnosticsUpdated);
+        assert_eq!(event.revision, 0);
+        assert_eq!(event.workspace_id, workspace.workspace_id);
     }
 }

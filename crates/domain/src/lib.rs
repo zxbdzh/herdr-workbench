@@ -3,7 +3,10 @@ use std::path::{Component, Path, PathBuf};
 pub mod events;
 pub mod preview;
 
-pub use events::{AppEvent, EventPayload, EventType, PreviewOpened, PreviewScreenshotCaptured};
+pub use events::{
+    AppEvent, EventPayload, EventType, PreviewDiagnosticsUpdated, PreviewOpened,
+    PreviewScreenshotCaptured,
+};
 pub use preview::{
     PreviewDiagnostic, PreviewDiagnosticKind, PreviewDiagnosticLevel, PreviewScreenshot,
     PreviewSession, PreviewSessionId, PreviewStatus,

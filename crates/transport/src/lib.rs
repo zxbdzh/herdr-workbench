@@ -3,19 +3,23 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path, State},
+    extract::{
+        Path, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
     http::{HeaderValue, StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use herdr_workbench_app_core::{
-    CapturePreview, EventPublisher, OpenPreview, PreviewAdapter, PreviewDiagnosticsSink,
-    PreviewError, PreviewScreenshotRepository, PreviewTransactionRepository, ScreenshotStore,
+    CapturePreview, EventBus, OpenPreview, PreviewAdapter, PreviewDiagnosticsSink, PreviewError,
+    PreviewScreenshotRepository, PreviewTransactionRepository, ScreenshotStore,
     WorkspaceRepository,
 };
 use herdr_workbench_contracts::{
     ApiDoc, PreviewDiagnosticDto, PreviewDiagnosticsResponse, PreviewOpenRequest,
-    PreviewScreenshotResponse, PreviewStateResponse, WorkspaceDto, WorkspaceListResponse,
+    PreviewScreenshotResponse, PreviewStateResponse, WorkspaceDto, WorkspaceEventEnvelope,
+    WorkspaceListResponse,
 };
 use rust_embed::RustEmbed;
 use utoipa::OpenApi;
@@ -24,16 +28,16 @@ use utoipa::OpenApi;
 #[folder = "../../web/dist/"]
 struct WebAssets;
 
-pub struct AppState<W, P, A, E, S> {
+pub struct AppState<W, P, A, S> {
     pub workspaces: Arc<W>,
     pub previews: Arc<P>,
     pub preview_adapter: Arc<A>,
-    pub events: Arc<E>,
+    pub events: Arc<EventBus>,
     pub screenshots: Arc<S>,
     pub diagnostics: Arc<dyn PreviewDiagnosticsSink>,
 }
 
-impl<W, P, A, E, S> Clone for AppState<W, P, A, E, S> {
+impl<W, P, A, S> Clone for AppState<W, P, A, S> {
     fn clone(&self) -> Self {
         Self {
             workspaces: Arc::clone(&self.workspaces),
@@ -46,12 +50,12 @@ impl<W, P, A, E, S> Clone for AppState<W, P, A, E, S> {
     }
 }
 
-impl<W, P, A, E, S> AppState<W, P, A, E, S> {
+impl<W, P, A, S> AppState<W, P, A, S> {
     pub fn new(
         workspaces: Arc<W>,
         previews: Arc<P>,
         preview_adapter: Arc<A>,
-        events: Arc<E>,
+        events: Arc<EventBus>,
         screenshots: Arc<S>,
         diagnostics: Arc<dyn PreviewDiagnosticsSink>,
     ) -> Self {
@@ -66,12 +70,11 @@ impl<W, P, A, E, S> AppState<W, P, A, E, S> {
     }
 }
 
-pub fn router<W, P, A, E, S>(state: AppState<W, P, A, E, S>) -> Router
+pub fn router<W, P, A, S>(state: AppState<W, P, A, S>) -> Router
 where
     W: WorkspaceRepository + 'static,
     P: PreviewTransactionRepository + PreviewScreenshotRepository + 'static,
     A: PreviewAdapter + 'static,
-    E: EventPublisher + 'static,
     S: ScreenshotStore + 'static,
 {
     Router::new()
@@ -80,22 +83,26 @@ where
         .route("/app", get(web_index))
         .route("/app/", get(web_index))
         .route("/app/{*path}", get(web_asset))
-        .route("/api/v1/workspaces", get(workspaces::<W, P, A, E, S>))
+        .route("/api/v1/workspaces", get(workspaces::<W, P, A, S>))
         .route(
             "/api/v1/workspaces/{id}/state",
-            get(workspace_state::<W, P, A, E, S>),
+            get(workspace_state::<W, P, A, S>),
         )
         .route(
             "/api/v1/workspaces/{id}/preview/open",
-            post(open_preview::<W, P, A, E, S>),
+            post(open_preview::<W, P, A, S>),
         )
         .route(
             "/api/v1/workspaces/{id}/preview/screenshot",
-            post(capture_screenshot::<W, P, A, E, S>).get(get_screenshot::<W, P, A, E, S>),
+            post(capture_screenshot::<W, P, A, S>).get(get_screenshot::<W, P, A, S>),
         )
         .route(
             "/api/v1/workspaces/{id}/preview/diagnostics",
-            get(get_diagnostics::<W, P, A, E, S>),
+            get(get_diagnostics::<W, P, A, S>),
+        )
+        .route(
+            "/ws/v1/workspaces/{id}",
+            get(workspace_events::<W, P, A, S>),
         )
         .with_state(state)
 }
@@ -149,14 +156,13 @@ async fn web_asset(Path(path): Path<String>) -> Response {
     response
 }
 
-async fn workspaces<W, P, A, E, S>(
-    State(state): State<AppState<W, P, A, E, S>>,
+async fn workspaces<W, P, A, S>(
+    State(state): State<AppState<W, P, A, S>>,
 ) -> Result<Json<WorkspaceListResponse>, ApiError>
 where
     W: WorkspaceRepository + 'static,
     P: PreviewTransactionRepository + PreviewScreenshotRepository + 'static,
     A: PreviewAdapter + 'static,
-    E: EventPublisher + 'static,
     S: ScreenshotStore + 'static,
 {
     let items = state
@@ -169,15 +175,14 @@ where
     }))
 }
 
-async fn workspace_state<W, P, A, E, S>(
+async fn workspace_state<W, P, A, S>(
     Path(id): Path<String>,
-    State(state): State<AppState<W, P, A, E, S>>,
+    State(state): State<AppState<W, P, A, S>>,
 ) -> Result<Json<PreviewStateResponse>, ApiError>
 where
     W: WorkspaceRepository + 'static,
     P: PreviewTransactionRepository + PreviewScreenshotRepository + 'static,
     A: PreviewAdapter + 'static,
-    E: EventPublisher + 'static,
     S: ScreenshotStore + 'static,
 {
     let workspace_id = parse_workspace_id(&id)?;
@@ -196,16 +201,15 @@ where
     Ok(Json(PreviewStateResponse::from_parts(workspace, preview)))
 }
 
-async fn open_preview<W, P, A, E, S>(
+async fn open_preview<W, P, A, S>(
     Path(id): Path<String>,
-    State(state): State<AppState<W, P, A, E, S>>,
+    State(state): State<AppState<W, P, A, S>>,
     Json(request): Json<PreviewOpenRequest>,
 ) -> Result<Json<PreviewStateResponse>, ApiError>
 where
     W: WorkspaceRepository + 'static,
     P: PreviewTransactionRepository + PreviewScreenshotRepository + 'static,
     A: PreviewAdapter + 'static,
-    E: EventPublisher + 'static,
     S: ScreenshotStore + 'static,
 {
     let workspace_id = parse_workspace_id(&id)?;
@@ -230,15 +234,14 @@ where
     )))
 }
 
-async fn capture_screenshot<W, P, A, E, S>(
+async fn capture_screenshot<W, P, A, S>(
     Path(id): Path<String>,
-    State(state): State<AppState<W, P, A, E, S>>,
+    State(state): State<AppState<W, P, A, S>>,
 ) -> Result<Json<PreviewScreenshotResponse>, ApiError>
 where
     W: WorkspaceRepository + 'static,
     P: PreviewTransactionRepository + PreviewScreenshotRepository + 'static,
     A: PreviewAdapter + 'static,
-    E: EventPublisher + 'static,
     S: ScreenshotStore + 'static,
 {
     let workspace_id = parse_workspace_id(&id)?;
@@ -260,15 +263,14 @@ where
     Ok(Json(PreviewScreenshotResponse::from(screenshot)))
 }
 
-async fn get_screenshot<W, P, A, E, S>(
+async fn get_screenshot<W, P, A, S>(
     Path(id): Path<String>,
-    State(state): State<AppState<W, P, A, E, S>>,
+    State(state): State<AppState<W, P, A, S>>,
 ) -> Result<Response, ApiError>
 where
     W: WorkspaceRepository + 'static,
     P: PreviewTransactionRepository + PreviewScreenshotRepository + 'static,
     A: PreviewAdapter + 'static,
-    E: EventPublisher + 'static,
     S: ScreenshotStore + 'static,
 {
     let workspace_id = parse_workspace_id(&id)?;
@@ -290,15 +292,14 @@ where
     Ok(response)
 }
 
-async fn get_diagnostics<W, P, A, E, S>(
+async fn get_diagnostics<W, P, A, S>(
     Path(id): Path<String>,
-    State(state): State<AppState<W, P, A, E, S>>,
+    State(state): State<AppState<W, P, A, S>>,
 ) -> Result<Json<PreviewDiagnosticsResponse>, ApiError>
 where
     W: WorkspaceRepository + 'static,
     P: PreviewTransactionRepository + PreviewScreenshotRepository + 'static,
     A: PreviewAdapter + 'static,
-    E: EventPublisher + 'static,
     S: ScreenshotStore + 'static,
 {
     let workspace_id = parse_workspace_id(&id)?;
@@ -316,6 +317,83 @@ where
             .map(PreviewDiagnosticDto::from)
             .collect(),
     }))
+}
+
+async fn workspace_events<W, P, A, S>(
+    Path(id): Path<String>,
+    State(state): State<AppState<W, P, A, S>>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, ApiError>
+where
+    W: WorkspaceRepository + 'static,
+    P: PreviewTransactionRepository + PreviewScreenshotRepository + 'static,
+    A: PreviewAdapter + 'static,
+    S: ScreenshotStore + 'static,
+{
+    let workspace_id = parse_workspace_id(&id)?;
+    let workspace = state
+        .workspaces
+        .find_by_id(&workspace_id)
+        .await
+        .map_err(ApiError::repository)?
+        .ok_or_else(|| ApiError::workspace_not_found(id.clone()))?;
+    let preview = state
+        .previews
+        .find_by_workspace(&workspace_id)
+        .await
+        .map_err(ApiError::repository)?;
+    let snapshot =
+        WorkspaceEventEnvelope::snapshot(PreviewStateResponse::from_parts(workspace, preview));
+    let receiver = state.events.subscribe();
+    Ok(
+        ws.on_upgrade(move |socket| {
+            push_workspace_events(socket, workspace_id, snapshot, receiver)
+        }),
+    )
+}
+
+async fn push_workspace_events(
+    mut socket: WebSocket,
+    workspace_id: herdr_workbench_domain::WorkbenchWorkspaceId,
+    snapshot: WorkspaceEventEnvelope,
+    mut receiver: tokio::sync::broadcast::Receiver<herdr_workbench_domain::AppEvent>,
+) {
+    if send_envelope(&mut socket, &snapshot).await.is_err() {
+        return;
+    }
+    loop {
+        match receiver.recv().await {
+            Ok(event) if event.workspace_id == workspace_id => {
+                let envelope = WorkspaceEventEnvelope::from_app_event(event);
+                if send_envelope(&mut socket, &envelope).await.is_err() {
+                    break;
+                }
+            }
+            Ok(_) => {}
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                let _ = socket
+                    .send(Message::Text(
+                        serde_json::json!({"event_type":"resync"})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await;
+                break;
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
+async fn send_envelope(
+    socket: &mut WebSocket,
+    envelope: &WorkspaceEventEnvelope,
+) -> Result<(), ()> {
+    let payload = serde_json::to_string(envelope).map_err(|_| ())?;
+    socket
+        .send(Message::Text(payload.into()))
+        .await
+        .map_err(|_| ())
 }
 
 fn parse_workspace_id(id: &str) -> Result<herdr_workbench_domain::WorkbenchWorkspaceId, ApiError> {
@@ -801,5 +879,120 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["diagnostics"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn unknown_workspace_websocket_returns_not_found() {
+        let app = empty_router();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let url = format!("ws://{addr}/ws/v1/workspaces/00000000-0000-0000-0000-000000000000");
+        let error = tokio_tungstenite::connect_async(url).await.unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("404") || message.contains("Not Found"),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_websocket_sends_snapshot_then_preview_opened() {
+        use futures_util::StreamExt;
+        let workspaces = Arc::new(InMemoryWorkspaceRepository::default());
+        let workspace = BindWorkspace::new(workspaces.as_ref())
+            .execute(
+                HerdrWorkspaceContext::new(
+                    "herdr-1",
+                    "Siftmark",
+                    std::path::PathBuf::from(r"C:\projects\siftmark"),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let events = Arc::new(EventBus::new(8));
+        let diagnostics = Arc::new(InMemoryPreviewDiagnostics::with_publisher(
+            Arc::clone(&events) as Arc<dyn herdr_workbench_app_core::EventPublisher>,
+        ));
+        let state = AppState::new(
+            workspaces,
+            Arc::new(InMemoryPreviewRepository::default()),
+            Arc::new(FakePreviewAdapter),
+            events,
+            Arc::new(InMemoryScreenshotStore::default()),
+            diagnostics,
+        );
+        let app = router(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let url = format!(
+            "ws://{addr}/ws/v1/workspaces/{}",
+            workspace.workspace_id.as_uuid()
+        );
+        let (mut socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+        let snapshot = socket.next().await.unwrap().unwrap().into_text().unwrap();
+        let snapshot: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        assert_eq!(snapshot["event_type"], "workspace.snapshot");
+        let request = format!(
+            "POST /api/v1/workspaces/{}/preview/open HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}",
+            workspace.workspace_id.as_uuid(),
+            addr
+        );
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        use tokio::io::AsyncWriteExt;
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let opened = socket.next().await.unwrap().unwrap().into_text().unwrap();
+        let opened: serde_json::Value = serde_json::from_str(&opened).unwrap();
+        assert_eq!(opened["event_type"], "preview.opened");
+    }
+
+    #[test]
+    fn app_events_map_to_workspace_envelopes() {
+        let workspace_id =
+            herdr_workbench_domain::WorkbenchWorkspaceId::from_uuid(uuid::Uuid::nil());
+        let session = PreviewSession {
+            session_id: herdr_workbench_domain::PreviewSessionId::from_uuid(uuid::Uuid::nil()),
+            workspace_id: workspace_id.clone(),
+            url: Some("http://localhost:3000".into()),
+            title: None,
+            status: herdr_workbench_domain::PreviewStatus::Open,
+        };
+        let opened = WorkspaceEventEnvelope::from_app_event(
+            herdr_workbench_domain::AppEvent::preview_opened(session, 1),
+        );
+        assert_eq!(opened.event_type, "preview.opened");
+        assert_eq!(opened.revision, 1);
+        let screenshot = herdr_workbench_domain::PreviewScreenshot {
+            screenshot_id: uuid::Uuid::nil(),
+            workspace_id: workspace_id.clone(),
+            path: "latest.png".into(),
+            sha256: "abc".into(),
+            byte_size: 8,
+            revision: 2,
+        };
+        let captured = WorkspaceEventEnvelope::from_app_event(
+            herdr_workbench_domain::AppEvent::preview_screenshot_captured(screenshot, 2),
+        );
+        assert_eq!(captured.event_type, "preview.screenshot_captured");
+        let diagnostic = herdr_workbench_domain::PreviewDiagnostic {
+            workspace_id,
+            kind: herdr_workbench_domain::PreviewDiagnosticKind::Console,
+            level: herdr_workbench_domain::PreviewDiagnosticLevel::Error,
+            message: "boom".into(),
+            source: None,
+            status: None,
+            occurred_at: chrono::Utc::now(),
+        };
+        let updated = WorkspaceEventEnvelope::from_app_event(
+            herdr_workbench_domain::AppEvent::preview_diagnostics_updated(diagnostic),
+        );
+        assert_eq!(updated.event_type, "preview.diagnostics_updated");
+        assert_eq!(updated.revision, 0);
     }
 }
