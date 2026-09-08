@@ -6,7 +6,7 @@ use herdr_workbench_app_core::PreviewStateUpdater;
 use herdr_workbench_domain::{PreviewSession, PreviewStatus, WorkbenchWorkspaceId, Workspace};
 use herdr_workbench_server::{connect_repository, serve_with_repository};
 use tauri::webview::PageLoadEvent;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use url::Url;
 
 /// Windows Preview 的 Tauri/WebView2 实现。
@@ -72,6 +72,15 @@ impl TauriWebViewPreviewAdapter {
             }
         });
     }
+
+    fn observe_window_close(window: &tauri::WebviewWindow, state: Arc<dyn PreviewStateUpdater>) {
+        let label = window.label().to_owned();
+        window.on_window_event(move |event| {
+            if matches!(event, WindowEvent::Destroyed) {
+                Self::persist_page_state(&state, &label, PreviewStatus::Unavailable, None, None);
+            }
+        });
+    }
 }
 
 #[async_trait::async_trait]
@@ -94,42 +103,45 @@ impl herdr_workbench_app_core::PreviewAdapter for TauriWebViewPreviewAdapter {
                         "failed to focus preview window: {error}"
                     ))
                 })?;
+            Self::observe_window_close(&window, Arc::clone(&self.state));
         } else {
             let state_started = Arc::clone(&self.state);
             let state_title = Arc::clone(&self.state);
-            WebviewWindowBuilder::new(&self.app, label, WebviewUrl::External(target.clone()))
-                .title(format!("Preview · {}", workspace.label))
-                .inner_size(1280.0, 800.0)
-                .center()
-                .focused(true)
-                .on_page_load(move |window, payload| {
-                    let status = match payload.event() {
-                        PageLoadEvent::Started => PreviewStatus::Opening,
-                        PageLoadEvent::Finished => PreviewStatus::Open,
-                    };
-                    Self::persist_page_state(
-                        &state_started,
-                        window.label(),
-                        status,
-                        Some(payload.url().to_string()),
-                        None,
-                    );
-                })
-                .on_document_title_changed(move |window, title| {
-                    Self::persist_page_state(
-                        &state_title,
-                        window.label(),
-                        PreviewStatus::Open,
-                        None,
-                        Some(title),
-                    );
-                })
-                .build()
-                .map_err(|error| {
-                    herdr_workbench_app_core::PreviewError::unavailable(format!(
-                        "failed to create preview window: {error}"
-                    ))
-                })?;
+            let window =
+                WebviewWindowBuilder::new(&self.app, label, WebviewUrl::External(target.clone()))
+                    .title(format!("Preview · {}", workspace.label))
+                    .inner_size(1280.0, 800.0)
+                    .center()
+                    .focused(true)
+                    .on_page_load(move |window, payload| {
+                        let status = match payload.event() {
+                            PageLoadEvent::Started => PreviewStatus::Opening,
+                            PageLoadEvent::Finished => PreviewStatus::Open,
+                        };
+                        Self::persist_page_state(
+                            &state_started,
+                            window.label(),
+                            status,
+                            Some(payload.url().to_string()),
+                            None,
+                        );
+                    })
+                    .on_document_title_changed(move |window, title| {
+                        Self::persist_page_state(
+                            &state_title,
+                            window.label(),
+                            PreviewStatus::Open,
+                            None,
+                            Some(title),
+                        );
+                    })
+                    .build()
+                    .map_err(|error| {
+                        herdr_workbench_app_core::PreviewError::unavailable(format!(
+                            "failed to create preview window: {error}"
+                        ))
+                    })?;
+            Self::observe_window_close(&window, Arc::clone(&self.state));
         }
 
         Ok(PreviewSession::opening(workspace, Some(target.to_string())).mark_open())
@@ -208,5 +220,17 @@ mod tests {
     fn unsupported_url_scheme_is_rejected() {
         let result = TauriWebViewPreviewAdapter::target_url(Some("file:///tmp/index.html".into()));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn unknown_preview_label_does_not_map_to_a_workspace() {
+        assert_eq!(
+            TauriWebViewPreviewAdapter::workspace_id_from_label("main"),
+            None
+        );
+        assert_eq!(
+            TauriWebViewPreviewAdapter::workspace_id_from_label("preview-not-a-uuid"),
+            None
+        );
     }
 }

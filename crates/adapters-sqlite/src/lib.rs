@@ -148,7 +148,7 @@ impl PreviewStateUpdater for SqliteWorkspaceRepository {
             PreviewStatus::Opening => "opening",
             PreviewStatus::Unavailable => "unavailable",
         };
-        let result = sqlx::query("UPDATE preview_sessions SET url = ?, title = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE workspace_id = ?")
+        let result = sqlx::query("UPDATE preview_sessions SET url = COALESCE(?, url), title = COALESCE(?, title), status = ?, updated_at = CURRENT_TIMESTAMP WHERE workspace_id = ?")
             .bind(&url)
             .bind(&title)
             .bind(status)
@@ -226,7 +226,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use herdr_workbench_app_core::{
-        BindWorkspace, EventBus, OpenPreview, PreviewAdapter, PreviewError,
+        BindWorkspace, EventBus, OpenPreview, PreviewAdapter, PreviewError, PreviewStateUpdater,
     };
     struct FakePreview;
     #[async_trait]
@@ -277,6 +277,51 @@ mod tests {
             .unwrap();
         assert_eq!(preview_count, 1);
         assert_eq!(event_count, 1);
+        assert_eq!(revision, 1);
+    }
+
+    #[tokio::test]
+    async fn updating_status_preserves_existing_url_and_title() {
+        let db = SqliteWorkspaceRepository::connect("sqlite://file:close?mode=memory&cache=shared")
+            .await
+            .unwrap();
+        db.migrate().await.unwrap();
+        let workspace = BindWorkspace::new(&db)
+            .execute(HerdrWorkspaceContext::new("h", "w", PathBuf::from(r"C:\w")).unwrap())
+            .await
+            .unwrap();
+        let bus = EventBus::new(4);
+        OpenPreview::new(&db, &FakePreview, &bus)
+            .execute(&workspace, Some("http://localhost:3000".into()))
+            .await
+            .unwrap();
+
+        db.update_preview_state(
+            &workspace.workspace_id,
+            PreviewStatus::Open,
+            Some("http://localhost:3000/app".into()),
+            Some("App".into()),
+        )
+        .await
+        .unwrap();
+
+        let closed = db
+            .update_preview_state(
+                &workspace.workspace_id,
+                PreviewStatus::Unavailable,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(closed.status, PreviewStatus::Unavailable);
+        assert_eq!(closed.url.as_deref(), Some("http://localhost:3000/app"));
+        assert_eq!(closed.title.as_deref(), Some("App"));
+        let revision: i64 = sqlx::query_scalar("SELECT revision FROM workspaces")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
         assert_eq!(revision, 1);
     }
 }
