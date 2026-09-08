@@ -3,8 +3,8 @@ use std::path::{Component, Path, PathBuf};
 pub mod events;
 pub mod preview;
 
-pub use events::{AppEvent, EventPayload, EventType, PreviewOpened};
-pub use preview::{PreviewSession, PreviewSessionId, PreviewStatus};
+pub use events::{AppEvent, EventPayload, EventType, PreviewOpened, PreviewScreenshotCaptured};
+pub use preview::{PreviewScreenshot, PreviewSession, PreviewSessionId, PreviewStatus};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

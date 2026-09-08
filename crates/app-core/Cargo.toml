@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 async-trait.workspace = true
 herdr-workbench-domain = { path = "../domain" }
+sha2 = "0.10"
 thiserror.workspace = true
 tokio.workspace = true
 uuid.workspace = true

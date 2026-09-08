@@ -40,3 +40,7 @@ path = "../crates/transport"
 [dependencies.tauri]
 version = "2.11.5"
 features = []
+
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.38"
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell"] }

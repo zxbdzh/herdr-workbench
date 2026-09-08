@@ -21,6 +21,8 @@ function App() {
   const [previews, setPreviews] = useState<Record<string, PreviewState>>({});
   const [error, setError] = useState<string | null>(null);
   const [opening, setOpening] = useState<string | null>(null);
+  const [capturing, setCapturing] = useState<string | null>(null);
+  const [shots, setShots] = useState<Record<string, string>>({});
 
   useEffect(() => {
     Promise.all([api<HealthResponse>("/api/v1/health"), api<WorkspaceListResponse>("/api/v1/workspaces")])
@@ -40,6 +42,29 @@ function App() {
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "无法读取 Preview 状态");
     } finally { setOpening(null); }
+  };
+
+  const captureScreenshot = async (workspace: Workspace) => {
+    setCapturing(workspace.workspace_id);
+    setError(null);
+    try {
+      const response = await fetch(`/api/v1/workspaces/${workspace.workspace_id}/preview/screenshot`, { method: "POST" });
+      if (!response.ok) {
+        const body = await response.json() as ApiError;
+        throw new Error(body.error?.message ?? `请求失败：${response.status}`);
+      }
+      const image = await fetch(`/api/v1/workspaces/${workspace.workspace_id}/preview/screenshot`);
+      if (!image.ok) throw new Error(`无法读取截图：${image.status}`);
+      const blob = await image.blob();
+      const url = URL.createObjectURL(blob);
+      setShots((current) => {
+        const previous = current[workspace.workspace_id];
+        if (previous) URL.revokeObjectURL(previous);
+        return { ...current, [workspace.workspace_id]: url };
+      });
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "无法捕获 Preview 截图");
+    } finally { setCapturing(null); }
   };
 
   return (
@@ -62,7 +87,9 @@ function App() {
           const preview = previews[workspace.workspace_id];
           return <article className="workspace" key={workspace.workspace_id}>
             <div className="workspace-index">W</div><div className="workspace-main"><h3>{workspace.label}</h3><code>{workspace.cwd}</code><span className="workspace-id">Herdr · {workspace.herdr_workspace_id}</span>{preview && <span className="preview-state">Preview · {preview.preview_status ?? "未打开"}{preview.preview_url ? ` · ${preview.preview_url}` : ""}</span>}</div>
-            <button className="preview-button" type="button" onClick={() => openPreview(workspace)} disabled={opening === workspace.workspace_id}>{opening === workspace.workspace_id ? "打开中..." : "查看 Preview"}</button><div className="revision">REV {workspace.revision}</div>
+            <button className="preview-button" type="button" onClick={() => openPreview(workspace)} disabled={opening === workspace.workspace_id}>{opening === workspace.workspace_id ? "打开中..." : "查看 Preview"}</button>
+            <button className="preview-button" type="button" onClick={() => captureScreenshot(workspace)} disabled={capturing === workspace.workspace_id}>{capturing === workspace.workspace_id ? "截图中..." : "截图"}</button>
+            {shots[workspace.workspace_id] && <img className="preview-shot" alt={`${workspace.label} preview`} src={shots[workspace.workspace_id]} />}<div className="revision">REV {workspace.revision}</div>
           </article>;
         })}
       </section>

@@ -2,8 +2,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use herdr_workbench_domain::{
-    AppEvent, DomainError, HerdrWorkspaceId, PreviewSession, PreviewStatus, WorkbenchWorkspaceId,
-    Workspace,
+    AppEvent, DomainError, HerdrWorkspaceId, PreviewScreenshot, PreviewSession, PreviewStatus,
+    WorkbenchWorkspaceId, Workspace,
 };
 use thiserror::Error;
 use tokio::sync::{RwLock, broadcast};
@@ -64,6 +64,16 @@ pub trait PreviewAdapter: Send + Sync {
         workspace: &Workspace,
         url: Option<String>,
     ) -> Result<PreviewSession, PreviewError>;
+
+    async fn capture_screenshot(
+        &self,
+        workspace: &Workspace,
+    ) -> Result<CapturedPreviewImage, PreviewError>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CapturedPreviewImage {
+    pub png: Vec<u8>,
 }
 
 #[async_trait]
@@ -81,6 +91,19 @@ pub trait PreviewTransactionRepository: Send + Sync {
 }
 
 #[async_trait]
+pub trait PreviewScreenshotRepository: Send + Sync {
+    async fn find_latest(
+        &self,
+        workspace_id: &WorkbenchWorkspaceId,
+    ) -> Result<Option<PreviewScreenshot>, RepositoryError>;
+
+    async fn commit_screenshot(
+        &self,
+        screenshot: PreviewScreenshot,
+    ) -> Result<DurableScreenshotCommit, RepositoryError>;
+}
+
+#[async_trait]
 pub trait PreviewStateUpdater: Send + Sync {
     async fn update_preview_state(
         &self,
@@ -94,6 +117,12 @@ pub trait PreviewStateUpdater: Send + Sync {
 #[derive(Clone, Debug)]
 pub struct DurablePreviewCommit {
     pub session: PreviewSession,
+    pub event: AppEvent,
+}
+
+#[derive(Clone, Debug)]
+pub struct DurableScreenshotCommit {
+    pub screenshot: PreviewScreenshot,
     pub event: AppEvent,
 }
 
@@ -168,6 +197,66 @@ where
     }
 }
 
+pub struct CapturePreview<'a, R, P, E, S> {
+    screenshots: &'a R,
+    adapter: &'a P,
+    events: &'a E,
+    store: &'a S,
+}
+
+impl<'a, R, P, E, S> CapturePreview<'a, R, P, E, S>
+where
+    R: PreviewScreenshotRepository,
+    P: PreviewAdapter,
+    E: EventPublisher,
+    S: ScreenshotStore,
+{
+    pub fn new(screenshots: &'a R, adapter: &'a P, events: &'a E, store: &'a S) -> Self {
+        Self {
+            screenshots,
+            adapter,
+            events,
+            store,
+        }
+    }
+
+    pub async fn execute(
+        &self,
+        workspace: &Workspace,
+    ) -> Result<PreviewScreenshot, ApplicationError> {
+        let image = self.adapter.capture_screenshot(workspace).await?;
+        let path = self.store.save(&workspace.workspace_id, &image.png).await?;
+        let screenshot = PreviewScreenshot {
+            screenshot_id: uuid::Uuid::now_v7(),
+            workspace_id: workspace.workspace_id.clone(),
+            path,
+            sha256: sha256_hex(&image.png),
+            byte_size: image.png.len() as u64,
+            revision: 0,
+        };
+        let commit = self.screenshots.commit_screenshot(screenshot).await?;
+        self.events.publish(commit.event).await;
+        Ok(commit.screenshot)
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[async_trait]
+pub trait ScreenshotStore: Send + Sync {
+    async fn save(
+        &self,
+        workspace_id: &WorkbenchWorkspaceId,
+        png: &[u8],
+    ) -> Result<String, RepositoryError>;
+
+    async fn load(&self, path: &str) -> Result<Vec<u8>, RepositoryError>;
+}
+
 #[derive(Clone, Default)]
 pub struct InMemoryWorkspaceRepository {
     workspaces: Arc<RwLock<HashMap<HerdrWorkspaceId, Workspace>>>,
@@ -218,6 +307,7 @@ impl WorkspaceRepository for InMemoryWorkspaceRepository {
 #[derive(Clone, Default)]
 pub struct InMemoryPreviewRepository {
     sessions: Arc<RwLock<HashMap<WorkbenchWorkspaceId, PreviewSession>>>,
+    screenshots: Arc<RwLock<HashMap<WorkbenchWorkspaceId, PreviewScreenshot>>>,
     revisions: Arc<RwLock<HashMap<WorkbenchWorkspaceId, u64>>>,
 }
 
@@ -291,6 +381,63 @@ impl PreviewStateUpdater for InMemoryPreviewRepository {
     }
 }
 
+#[async_trait]
+impl PreviewScreenshotRepository for InMemoryPreviewRepository {
+    async fn find_latest(
+        &self,
+        workspace_id: &WorkbenchWorkspaceId,
+    ) -> Result<Option<PreviewScreenshot>, RepositoryError> {
+        Ok(self.screenshots.read().await.get(workspace_id).cloned())
+    }
+
+    async fn commit_screenshot(
+        &self,
+        mut screenshot: PreviewScreenshot,
+    ) -> Result<DurableScreenshotCommit, RepositoryError> {
+        let mut revisions = self.revisions.write().await;
+        let revision = revisions
+            .entry(screenshot.workspace_id.clone())
+            .or_insert(0);
+        *revision += 1;
+        screenshot.revision = *revision;
+        self.screenshots
+            .write()
+            .await
+            .insert(screenshot.workspace_id.clone(), screenshot.clone());
+        Ok(DurableScreenshotCommit {
+            event: AppEvent::preview_screenshot_captured(screenshot.clone(), screenshot.revision),
+            screenshot,
+        })
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct InMemoryScreenshotStore {
+    files: Arc<RwLock<HashMap<String, Vec<u8>>>>,
+}
+
+#[async_trait]
+impl ScreenshotStore for InMemoryScreenshotStore {
+    async fn save(
+        &self,
+        workspace_id: &WorkbenchWorkspaceId,
+        png: &[u8],
+    ) -> Result<String, RepositoryError> {
+        let path = format!("memory://{}", workspace_id.as_uuid());
+        self.files.write().await.insert(path.clone(), png.to_vec());
+        Ok(path)
+    }
+
+    async fn load(&self, path: &str) -> Result<Vec<u8>, RepositoryError> {
+        self.files
+            .read()
+            .await
+            .get(path)
+            .cloned()
+            .ok_or_else(|| RepositoryError::new("screenshot file not found"))
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ApplicationError {
     #[error(transparent)]
@@ -334,9 +481,10 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        BindWorkspace, EventBus, HerdrWorkspaceContext, InMemoryPreviewRepository,
-        InMemoryWorkspaceRepository, OpenPreview, PreviewAdapter, PreviewError,
-        PreviewStateUpdater,
+        BindWorkspace, CapturePreview, CapturedPreviewImage, EventBus, HerdrWorkspaceContext,
+        InMemoryPreviewRepository, InMemoryScreenshotStore, InMemoryWorkspaceRepository,
+        OpenPreview, PreviewAdapter, PreviewError, PreviewScreenshotRepository,
+        PreviewStateUpdater, ScreenshotStore,
     };
     use async_trait::async_trait;
     use herdr_workbench_domain::{EventPayload, EventType, PreviewSession};
@@ -351,6 +499,15 @@ mod tests {
             url: Option<String>,
         ) -> Result<PreviewSession, PreviewError> {
             Ok(PreviewSession::opening(workspace, url).mark_open())
+        }
+
+        async fn capture_screenshot(
+            &self,
+            _: &herdr_workbench_domain::Workspace,
+        ) -> Result<CapturedPreviewImage, PreviewError> {
+            Ok(CapturedPreviewImage {
+                png: vec![137, 80, 78, 71, 13, 10, 26, 10],
+            })
         }
     }
 
@@ -500,5 +657,52 @@ mod tests {
         assert_eq!(closed.url.as_deref(), Some("http://localhost:3000/app"));
         assert_eq!(closed.title.as_deref(), Some("App"));
         assert_eq!(previews.revision(&workspace.workspace_id).await, 1);
+    }
+
+    #[tokio::test]
+    async fn capturing_screenshot_persists_metadata_and_advances_revision() {
+        let workspaces = InMemoryWorkspaceRepository::default();
+        let workspace = BindWorkspace::new(&workspaces)
+            .execute(
+                HerdrWorkspaceContext::new(
+                    "herdr-workspace-1",
+                    "Siftmark",
+                    PathBuf::from(r"C:\projects\siftmark"),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let previews = InMemoryPreviewRepository::default();
+        let store = InMemoryScreenshotStore::default();
+        let events = EventBus::new(16);
+        let mut receiver = events.subscribe();
+        OpenPreview::new(&previews, &FakePreviewAdapter, &events)
+            .execute(&workspace, Some("http://localhost:3000".into()))
+            .await
+            .unwrap();
+        let _ = receiver.recv().await.unwrap();
+
+        let screenshot = CapturePreview::new(&previews, &FakePreviewAdapter, &events, &store)
+            .execute(&workspace)
+            .await
+            .unwrap();
+        let event = receiver.recv().await.unwrap();
+        let stored = store.load(&screenshot.path).await.unwrap();
+
+        assert_eq!(screenshot.workspace_id, workspace.workspace_id);
+        assert_eq!(screenshot.revision, 2);
+        assert_eq!(screenshot.byte_size, 8);
+        assert_eq!(stored, vec![137, 80, 78, 71, 13, 10, 26, 10]);
+        assert_eq!(event.event_type, EventType::PreviewScreenshotCaptured);
+        assert_eq!(event.revision, 2);
+        assert_eq!(previews.revision(&workspace.workspace_id).await, 2);
+        assert!(
+            previews
+                .find_latest(&workspace.workspace_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 }

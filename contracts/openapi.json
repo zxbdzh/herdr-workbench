@@ -107,6 +107,85 @@
         }
       }
     },
+    "/api/v1/workspaces/{id}/preview/screenshot": {
+      "get": {
+        "tags": [],
+        "operationId": "get_preview_screenshot",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Workbench workspace ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [],
+        "operationId": "capture_preview_screenshot",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Workbench workspace ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewScreenshotResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/workspaces/{id}/state": {
       "get": {
         "tags": [],
@@ -203,6 +282,41 @@
           }
         }
       },
+      "PreviewScreenshotResponse": {
+        "type": "object",
+        "required": [
+          "screenshot_id",
+          "workspace_id",
+          "path",
+          "sha256",
+          "byte_size",
+          "revision"
+        ],
+        "properties": {
+          "byte_size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "path": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "screenshot_id": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "type": "string"
+          }
+        }
+      },
       "PreviewStateResponse": {
         "type": "object",
         "required": [
@@ -216,6 +330,12 @@
             ]
           },
           "preview_status": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "preview_title": {
             "type": [
               "string",
               "null"
