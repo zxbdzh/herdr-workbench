@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 axum = "0.8"
 herdr-workbench-adapters-sqlite = { path = "../adapters-sqlite" }
+herdr-workbench-adapters-herdr = { path = "../adapters-herdr" }
 herdr-workbench-app-core = { path = "../app-core" }
 herdr-workbench-transport = { path = "../transport" }
 rust-embed = "8"

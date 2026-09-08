@@ -586,6 +586,11 @@ impl ApiError {
                 message: error.to_string(),
                 status: StatusCode::BAD_REQUEST,
             },
+            herdr_workbench_app_core::ApplicationError::Herdr(error) => Self {
+                code: "herdr_unavailable",
+                message: error.to_string(),
+                status: StatusCode::SERVICE_UNAVAILABLE,
+            },
         }
     }
 }

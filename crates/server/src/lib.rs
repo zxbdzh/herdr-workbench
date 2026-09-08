@@ -1,8 +1,10 @@
 use std::{env, fs, net::SocketAddr, path::PathBuf, sync::Arc};
 
+use herdr_workbench_adapters_herdr::HerdrCliHost;
 use herdr_workbench_adapters_sqlite::{FilesystemScreenshotStore, SqliteWorkspaceRepository};
 use herdr_workbench_app_core::{
     EventBus, EventPublisher, InMemoryPreviewDiagnostics, PreviewAdapter, PreviewDiagnosticsSink,
+    SyncHerdrWorkspaces, WorkspaceRepository,
 };
 use herdr_workbench_transport::{AppState, router};
 use thiserror::Error;
@@ -66,11 +68,29 @@ pub fn diagnostics_with_bus(events: Arc<EventBus>) -> Arc<dyn PreviewDiagnostics
     ))
 }
 
+pub async fn sync_herdr_workspaces<R>(repository: &R)
+where
+    R: WorkspaceRepository,
+{
+    let host = HerdrCliHost::from_env();
+    match SyncHerdrWorkspaces::new(repository, &host).execute().await {
+        Ok(report) => {
+            println!(
+                "Herdr workspace sync bound {} workspace(s), skipped {}",
+                report.bound.len(),
+                report.skipped
+            );
+        }
+        Err(error) => eprintln!("Herdr workspace sync skipped: {error}"),
+    }
+}
+
 pub async fn serve<A>(preview_adapter: Arc<A>) -> Result<(), ServerError>
 where
     A: PreviewAdapter + 'static,
 {
     let repository = connect_repository().await?;
+    sync_herdr_workspaces(repository.as_ref()).await;
     let events = shared_event_bus();
     let diagnostics = diagnostics_with_bus(Arc::clone(&events));
     serve_with_repository(repository, preview_adapter, diagnostics, events).await
