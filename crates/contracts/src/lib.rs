@@ -62,6 +62,29 @@ impl PreviewStateResponse {
 }
 
 #[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct PreviewScreenshotResponse {
+    pub screenshot_id: String,
+    pub workspace_id: String,
+    pub path: String,
+    pub sha256: String,
+    pub byte_size: u64,
+    pub revision: u64,
+}
+
+impl From<herdr_workbench_domain::PreviewScreenshot> for PreviewScreenshotResponse {
+    fn from(screenshot: herdr_workbench_domain::PreviewScreenshot) -> Self {
+        Self {
+            screenshot_id: screenshot.screenshot_id.to_string(),
+            workspace_id: screenshot.workspace_id.as_uuid().to_string(),
+            path: screenshot.path,
+            sha256: screenshot.sha256,
+            byte_size: screenshot.byte_size,
+            revision: screenshot.revision,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct ErrorResponse {
     pub error: ErrorBody,
 }
@@ -75,10 +98,10 @@ pub struct ErrorBody {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(health, list_workspaces, get_workspace_state, open_preview),
+    paths(health, list_workspaces, get_workspace_state, open_preview, capture_preview_screenshot, get_preview_screenshot),
     components(schemas(
         HealthResponse, WorkspaceDto, WorkspaceListResponse, PreviewOpenRequest,
-        PreviewStateResponse, ErrorResponse, ErrorBody
+        PreviewStateResponse, PreviewScreenshotResponse, ErrorResponse, ErrorBody
     )),
     tags((name = "system", description = "Workbench system endpoints"))
 )]
@@ -106,3 +129,19 @@ pub fn get_workspace_state() {}
     responses((status = 200, body = PreviewStateResponse), (status = 404, body = ErrorResponse), (status = 503, body = ErrorResponse))
 )]
 pub fn open_preview() {}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{id}/preview/screenshot",
+    params(("id" = String, Path, description = "Workbench workspace ID")),
+    responses((status = 200, body = PreviewScreenshotResponse), (status = 404, body = ErrorResponse), (status = 503, body = ErrorResponse))
+)]
+pub fn capture_preview_screenshot() {}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{id}/preview/screenshot",
+    params(("id" = String, Path, description = "Workbench workspace ID")),
+    responses((status = 200), (status = 404, body = ErrorResponse))
+)]
+pub fn get_preview_screenshot() {}

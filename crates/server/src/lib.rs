@@ -1,6 +1,6 @@
 use std::{env, fs, net::SocketAddr, path::PathBuf, sync::Arc};
 
-use herdr_workbench_adapters_sqlite::SqliteWorkspaceRepository;
+use herdr_workbench_adapters_sqlite::{FilesystemScreenshotStore, SqliteWorkspaceRepository};
 use herdr_workbench_app_core::{EventBus, PreviewAdapter};
 use herdr_workbench_transport::{AppState, router};
 use thiserror::Error;
@@ -45,6 +45,15 @@ pub async fn connect_repository() -> Result<Arc<SqliteWorkspaceRepository>, Serv
     Ok(repository)
 }
 
+fn screenshot_store() -> Arc<FilesystemScreenshotStore> {
+    let data_dir = env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("HerdrWorkbench")
+        .join("screenshots");
+    Arc::new(FilesystemScreenshotStore::new(data_dir))
+}
+
 pub async fn serve<A>(preview_adapter: Arc<A>) -> Result<(), ServerError>
 where
     A: PreviewAdapter + 'static,
@@ -73,6 +82,7 @@ where
             repository,
             preview_adapter,
             events,
+            screenshot_store(),
         )),
     )
     .await

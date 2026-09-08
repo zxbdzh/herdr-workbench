@@ -58,3 +58,13 @@ impl PreviewSession {
         self
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewScreenshot {
+    pub screenshot_id: Uuid,
+    pub workspace_id: WorkbenchWorkspaceId,
+    pub path: String,
+    pub sha256: String,
+    pub byte_size: u64,
+    pub revision: u64,
+}

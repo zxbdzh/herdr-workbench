@@ -146,6 +146,142 @@ impl herdr_workbench_app_core::PreviewAdapter for TauriWebViewPreviewAdapter {
 
         Ok(PreviewSession::opening(workspace, Some(target.to_string())).mark_open())
     }
+
+    async fn capture_screenshot(
+        &self,
+        workspace: &Workspace,
+    ) -> Result<
+        herdr_workbench_app_core::CapturedPreviewImage,
+        herdr_workbench_app_core::PreviewError,
+    > {
+        let label = Self::window_label(workspace);
+        let Some(window) = self.app.get_webview_window(&label) else {
+            return Err(herdr_workbench_app_core::PreviewError::unavailable(
+                "preview window is not open",
+            ));
+        };
+        capture_webview_png(&window)
+    }
+}
+
+fn capture_webview_png(
+    window: &tauri::WebviewWindow,
+) -> Result<herdr_workbench_app_core::CapturedPreviewImage, herdr_workbench_app_core::PreviewError>
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    window
+        .with_webview(move |webview| {
+            let result = unsafe { capture_webview2_png(webview) };
+            let _ = tx.send(result);
+        })
+        .map_err(|error| {
+            herdr_workbench_app_core::PreviewError::unavailable(format!(
+                "failed to access preview webview: {error}"
+            ))
+        })?;
+    rx.recv().map_err(|_| {
+        herdr_workbench_app_core::PreviewError::unavailable(
+            "preview screenshot capture was cancelled",
+        )
+    })?
+}
+
+#[cfg(windows)]
+unsafe fn capture_webview2_png(
+    webview: tauri::webview::PlatformWebview,
+) -> Result<herdr_workbench_app_core::CapturedPreviewImage, herdr_workbench_app_core::PreviewError>
+{
+    use std::fs;
+    use webview2_com::{
+        CapturePreviewCompletedHandler,
+        Microsoft::Web::WebView2::Win32::COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
+    };
+    use windows::{
+        Win32::System::Com::{STGC_DEFAULT, STGM_CREATE, STGM_READWRITE, STGM_SHARE_EXCLUSIVE},
+        Win32::UI::Shell::SHCreateStreamOnFileEx,
+        core::HSTRING,
+    };
+
+    let controller = webview.controller();
+    let core = unsafe { controller.CoreWebView2() }.map_err(|error| {
+        herdr_workbench_app_core::PreviewError::unavailable(format!(
+            "failed to access WebView2: {error}"
+        ))
+    })?;
+    let path = unique_capture_path()?;
+    let path_wide = HSTRING::from(path.as_os_str());
+    let stream = unsafe {
+        SHCreateStreamOnFileEx(
+            &path_wide,
+            STGM_CREATE.0 | STGM_READWRITE.0 | STGM_SHARE_EXCLUSIVE.0,
+            0,
+            true,
+            None,
+        )
+    }
+    .map_err(|error| {
+        herdr_workbench_app_core::PreviewError::unavailable(format!(
+            "failed to create screenshot stream: {error}"
+        ))
+    })?;
+    let stream_for_capture = stream.clone();
+    CapturePreviewCompletedHandler::wait_for_async_operation(
+        Box::new(move |handler| {
+            unsafe {
+                core.CapturePreview(
+                    COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
+                    &stream_for_capture,
+                    &handler,
+                )
+            }
+            .map_err(webview2_com::Error::WindowsError)
+        }),
+        Box::new(|result| result),
+    )
+    .map_err(|error| {
+        herdr_workbench_app_core::PreviewError::unavailable(format!(
+            "failed to capture preview screenshot: {error}"
+        ))
+    })?;
+    unsafe { stream.Commit(STGC_DEFAULT) }.map_err(|error| {
+        herdr_workbench_app_core::PreviewError::unavailable(format!(
+            "failed to commit screenshot stream: {error}"
+        ))
+    })?;
+    drop(stream);
+
+    let png = fs::read(&path).map_err(|error| {
+        herdr_workbench_app_core::PreviewError::unavailable(format!(
+            "failed to read screenshot file: {error}"
+        ))
+    })?;
+    let _ = fs::remove_file(&path);
+    if png.is_empty() {
+        return Err(herdr_workbench_app_core::PreviewError::unavailable(
+            "preview screenshot was empty",
+        ));
+    }
+    Ok(herdr_workbench_app_core::CapturedPreviewImage { png })
+}
+
+#[cfg(windows)]
+fn unique_capture_path() -> Result<std::path::PathBuf, herdr_workbench_app_core::PreviewError> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    Ok(std::env::temp_dir().join(format!("herdr-preview-capture-{nanos}.png")))
+}
+
+#[cfg(not(windows))]
+unsafe fn capture_webview2_png(
+    _: tauri::webview::PlatformWebview,
+) -> Result<herdr_workbench_app_core::CapturedPreviewImage, herdr_workbench_app_core::PreviewError>
+{
+    Err(herdr_workbench_app_core::PreviewError::unavailable(
+        "preview screenshots are only supported on Windows",
+    ))
 }
 
 pub fn run() {
