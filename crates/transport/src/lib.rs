@@ -759,4 +759,47 @@ mod tests {
         assert_eq!(json["diagnostics"][0]["level"], "error");
         assert_eq!(json["diagnostics"][0]["message"], "boom");
     }
+
+    #[tokio::test]
+    async fn preview_diagnostics_route_returns_empty_list_when_none_are_recorded() {
+        let workspaces = Arc::new(InMemoryWorkspaceRepository::default());
+        let workspace = BindWorkspace::new(workspaces.as_ref())
+            .execute(
+                HerdrWorkspaceContext::new(
+                    "herdr-1",
+                    "Siftmark",
+                    std::path::PathBuf::from(r"C:\projects\siftmark"),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let state = AppState::new(
+            workspaces,
+            Arc::new(InMemoryPreviewRepository::default()),
+            Arc::new(FakePreviewAdapter),
+            Arc::new(EventBus::new(8)),
+            Arc::new(InMemoryScreenshotStore::default()),
+            Arc::new(InMemoryPreviewDiagnostics::default()),
+        );
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/workspaces/{}/preview/diagnostics",
+                        workspace.workspace_id.as_uuid()
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["diagnostics"], serde_json::json!([]));
+    }
 }
