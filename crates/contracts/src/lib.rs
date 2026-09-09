@@ -143,15 +143,35 @@ impl WorkspaceEventEnvelope {
     }
 
     pub fn from_app_event(event: herdr_workbench_domain::AppEvent) -> Self {
-        let event_type = match event.event_type {
-            herdr_workbench_domain::EventType::PreviewOpened => "preview.opened",
-            herdr_workbench_domain::EventType::PreviewScreenshotCaptured => {
-                "preview.screenshot_captured"
-            }
-            herdr_workbench_domain::EventType::PreviewDiagnosticsUpdated => {
-                "preview.diagnostics_updated"
-            }
-            herdr_workbench_domain::EventType::PreviewStateUpdated => "preview.state_updated",
+        let (event_type, payload) = match event.payload {
+            herdr_workbench_domain::EventPayload::PreviewOpened(opened) => (
+                "preview.opened",
+                serde_json::json!({
+                    "preview_session_id": opened.session.session_id.as_uuid().to_string(),
+                    "preview_url": opened.session.url,
+                    "preview_status": format!("{:?}", opened.session.status),
+                    "preview_title": opened.session.title,
+                }),
+            ),
+            herdr_workbench_domain::EventPayload::PreviewScreenshotCaptured(captured) => (
+                "preview.screenshot_captured",
+                serde_json::to_value(PreviewScreenshotResponse::from(captured.screenshot))
+                    .unwrap_or(Value::Null),
+            ),
+            herdr_workbench_domain::EventPayload::PreviewDiagnosticsUpdated(updated) => (
+                "preview.diagnostics_updated",
+                serde_json::to_value(PreviewDiagnosticDto::from(updated.diagnostic))
+                    .unwrap_or(Value::Null),
+            ),
+            herdr_workbench_domain::EventPayload::PreviewStateUpdated(updated) => (
+                "preview.state_updated",
+                serde_json::json!({
+                    "preview_session_id": updated.session.session_id.as_uuid().to_string(),
+                    "preview_url": updated.session.url,
+                    "preview_status": format!("{:?}", updated.session.status),
+                    "preview_title": updated.session.title,
+                }),
+            ),
         };
         Self {
             event_id: event.event_id.to_string(),
@@ -159,7 +179,7 @@ impl WorkspaceEventEnvelope {
             workspace_id: event.workspace_id.as_uuid().to_string(),
             occurred_at: event.occurred_at.to_rfc3339(),
             revision: event.revision,
-            payload: serde_json::to_value(&event.payload).unwrap_or(Value::Null),
+            payload,
         }
     }
 }

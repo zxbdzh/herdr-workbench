@@ -974,6 +974,13 @@ mod tests {
         );
         assert_eq!(opened.event_type, "preview.opened");
         assert_eq!(opened.revision, 1);
+        assert_eq!(
+            opened.payload["preview_session_id"],
+            session.session_id.as_uuid().to_string()
+        );
+        assert_eq!(opened.payload["preview_url"], "http://localhost:3000");
+        assert_eq!(opened.payload["preview_status"], "Open");
+        assert!(opened.payload.get("PreviewOpened").is_none());
         let screenshot = herdr_workbench_domain::PreviewScreenshot {
             screenshot_id: uuid::Uuid::nil(),
             workspace_id: workspace_id.clone(),
@@ -986,6 +993,8 @@ mod tests {
             herdr_workbench_domain::AppEvent::preview_screenshot_captured(screenshot, 2),
         );
         assert_eq!(captured.event_type, "preview.screenshot_captured");
+        assert_eq!(captured.payload["path"], "latest.png");
+        assert!(captured.payload.get("PreviewScreenshotCaptured").is_none());
         let diagnostic = herdr_workbench_domain::PreviewDiagnostic {
             workspace_id,
             kind: herdr_workbench_domain::PreviewDiagnosticKind::Console,
@@ -1000,11 +1009,16 @@ mod tests {
         );
         assert_eq!(updated.event_type, "preview.diagnostics_updated");
         assert_eq!(updated.revision, 0);
+        assert_eq!(updated.payload["kind"], "console");
+        assert!(updated.payload.get("PreviewDiagnosticsUpdated").is_none());
         let state = WorkspaceEventEnvelope::from_app_event(
             herdr_workbench_domain::AppEvent::preview_state_updated(session),
         );
         assert_eq!(state.event_type, "preview.state_updated");
         assert_eq!(state.revision, 0);
+        assert_eq!(state.payload["preview_status"], "Open");
+        assert_eq!(state.payload["preview_url"], "http://localhost:3000");
+        assert!(state.payload.get("PreviewStateUpdated").is_none());
     }
 
     #[tokio::test]
