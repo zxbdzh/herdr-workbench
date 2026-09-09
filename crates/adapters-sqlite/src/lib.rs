@@ -464,6 +464,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(revision, 1);
+        let event_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM durable_events")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(event_count, 1);
     }
 
     #[tokio::test]

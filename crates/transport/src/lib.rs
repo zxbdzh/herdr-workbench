@@ -612,7 +612,8 @@ mod tests {
     use axum::{body::Body, http::Request};
     use herdr_workbench_app_core::{
         BindWorkspace, EventBus, InMemoryPreviewDiagnostics, InMemoryPreviewRepository,
-        InMemoryScreenshotStore, InMemoryWorkspaceRepository, PreviewDiagnosticsSink,
+        InMemoryScreenshotStore, InMemoryWorkspaceRepository, OpenPreview, PreviewDiagnosticsSink,
+        PreviewStateUpdater, PublishingPreviewStateUpdater,
     };
     use herdr_workbench_domain::{HerdrWorkspaceContext, PreviewSession};
     use tower::ServiceExt;
@@ -969,7 +970,7 @@ mod tests {
             status: herdr_workbench_domain::PreviewStatus::Open,
         };
         let opened = WorkspaceEventEnvelope::from_app_event(
-            herdr_workbench_domain::AppEvent::preview_opened(session, 1),
+            herdr_workbench_domain::AppEvent::preview_opened(session.clone(), 1),
         );
         assert_eq!(opened.event_type, "preview.opened");
         assert_eq!(opened.revision, 1);
@@ -999,5 +1000,71 @@ mod tests {
         );
         assert_eq!(updated.event_type, "preview.diagnostics_updated");
         assert_eq!(updated.revision, 0);
+        let state = WorkspaceEventEnvelope::from_app_event(
+            herdr_workbench_domain::AppEvent::preview_state_updated(session),
+        );
+        assert_eq!(state.event_type, "preview.state_updated");
+        assert_eq!(state.revision, 0);
+    }
+
+    #[tokio::test]
+    async fn workspace_websocket_sends_snapshot_then_preview_state_updated() {
+        use futures_util::StreamExt;
+        let workspaces = Arc::new(InMemoryWorkspaceRepository::default());
+        let workspace = BindWorkspace::new(workspaces.as_ref())
+            .execute(
+                HerdrWorkspaceContext::new(
+                    "herdr-1",
+                    "Siftmark",
+                    std::path::PathBuf::from(r"C:\projects\siftmark"),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let events = Arc::new(EventBus::new(8));
+        let previews = Arc::new(InMemoryPreviewRepository::default());
+        OpenPreview::new(previews.as_ref(), &FakePreviewAdapter, events.as_ref())
+            .execute(&workspace, Some("http://localhost:3000".into()))
+            .await
+            .unwrap();
+        let diagnostics = Arc::new(InMemoryPreviewDiagnostics::with_publisher(
+            Arc::clone(&events) as Arc<dyn herdr_workbench_app_core::EventPublisher>,
+        ));
+        let state = AppState::new(
+            workspaces,
+            Arc::clone(&previews),
+            Arc::new(FakePreviewAdapter),
+            Arc::clone(&events),
+            Arc::new(InMemoryScreenshotStore::default()),
+            diagnostics,
+        );
+        let app = router(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let url = format!(
+            "ws://{addr}/ws/v1/workspaces/{}",
+            workspace.workspace_id.as_uuid()
+        );
+        let (mut socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+        let snapshot = socket.next().await.unwrap().unwrap().into_text().unwrap();
+        let snapshot: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        assert_eq!(snapshot["event_type"], "workspace.snapshot");
+        PublishingPreviewStateUpdater::new(Arc::clone(&previews), Arc::clone(&events))
+            .update_preview_state(
+                &workspace.workspace_id,
+                herdr_workbench_domain::PreviewStatus::Open,
+                Some("http://localhost:3000/app".into()),
+                Some("App".into()),
+            )
+            .await
+            .unwrap();
+        let updated = socket.next().await.unwrap().unwrap().into_text().unwrap();
+        let updated: serde_json::Value = serde_json::from_str(&updated).unwrap();
+        assert_eq!(updated["event_type"], "preview.state_updated");
+        assert_eq!(updated["revision"], 0);
     }
 }

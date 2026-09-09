@@ -439,6 +439,71 @@ impl EventPublisher for EventBus {
     }
 }
 
+#[async_trait]
+impl EventPublisher for Arc<EventBus> {
+    async fn publish(&self, event: AppEvent) {
+        EventBus::publish(self, event).await;
+    }
+}
+
+#[async_trait]
+impl EventPublisher for &EventBus {
+    async fn publish(&self, event: AppEvent) {
+        EventBus::publish(*self, event).await;
+    }
+}
+
+#[async_trait]
+impl<T> PreviewStateUpdater for Arc<T>
+where
+    T: PreviewStateUpdater + Send + Sync,
+{
+    async fn update_preview_state(
+        &self,
+        workspace_id: &WorkbenchWorkspaceId,
+        status: PreviewStatus,
+        url: Option<String>,
+        title: Option<String>,
+    ) -> Result<PreviewSession, RepositoryError> {
+        T::update_preview_state(self, workspace_id, status, url, title).await
+    }
+}
+
+pub struct PublishingPreviewStateUpdater<R, E> {
+    inner: R,
+    events: E,
+}
+
+impl<R, E> PublishingPreviewStateUpdater<R, E> {
+    pub fn new(inner: R, events: E) -> Self {
+        Self { inner, events }
+    }
+}
+
+#[async_trait]
+impl<R, E> PreviewStateUpdater for PublishingPreviewStateUpdater<R, E>
+where
+    R: PreviewStateUpdater,
+    E: EventPublisher,
+{
+    async fn update_preview_state(
+        &self,
+        workspace_id: &WorkbenchWorkspaceId,
+        status: PreviewStatus,
+        url: Option<String>,
+        title: Option<String>,
+    ) -> Result<PreviewSession, RepositoryError> {
+        let session = self
+            .inner
+            .update_preview_state(workspace_id, status, url, title)
+            .await?;
+        self.events
+            .publish(AppEvent::preview_state_updated(session.clone()))
+            .await;
+        Ok(session)
+    }
+}
+
 pub struct OpenPreview<'a, R, P, E> {
     previews: &'a R,
     adapter: &'a P,
@@ -774,8 +839,8 @@ mod tests {
         HerdrReconcileLoop, HerdrWorkspaceContext, HerdrWorkspaceInfo, InMemoryPreviewDiagnostics,
         InMemoryPreviewRepository, InMemoryScreenshotStore, InMemoryWorkspaceRepository,
         OpenPreview, PreviewAdapter, PreviewDiagnosticsSink, PreviewError,
-        PreviewScreenshotRepository, PreviewStateUpdater, ReconcileSleeper, ScreenshotStore,
-        SyncHerdrWorkspaces, WorkspaceRepository,
+        PreviewScreenshotRepository, PreviewStateUpdater, PublishingPreviewStateUpdater,
+        ReconcileSleeper, ScreenshotStore, SyncHerdrWorkspaces, WorkspaceRepository,
     };
     use async_trait::async_trait;
     use herdr_workbench_domain::{
@@ -948,6 +1013,65 @@ mod tests {
             closed.status,
             herdr_workbench_domain::PreviewStatus::Unavailable
         );
+        assert_eq!(closed.url.as_deref(), Some("http://localhost:3000/app"));
+        assert_eq!(closed.title.as_deref(), Some("App"));
+        assert_eq!(previews.revision(&workspace.workspace_id).await, 1);
+    }
+
+    #[tokio::test]
+    async fn updating_preview_state_publishes_without_advancing_revision() {
+        let workspaces = InMemoryWorkspaceRepository::default();
+        let workspace = BindWorkspace::new(&workspaces)
+            .execute(
+                HerdrWorkspaceContext::new(
+                    "herdr-workspace-1",
+                    "Siftmark",
+                    PathBuf::from(r"C:\projects\siftmark"),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let previews = InMemoryPreviewRepository::default();
+        let events = EventBus::new(16);
+        OpenPreview::new(&previews, &FakePreviewAdapter, &events)
+            .execute(&workspace, Some("http://localhost:3000".into()))
+            .await
+            .unwrap();
+        let mut receiver = events.subscribe();
+        let updater = PublishingPreviewStateUpdater::new(previews.clone(), events.clone());
+
+        let session = updater
+            .update_preview_state(
+                &workspace.workspace_id,
+                herdr_workbench_domain::PreviewStatus::Open,
+                Some("http://localhost:3000/app".into()),
+                Some("App".into()),
+            )
+            .await
+            .unwrap();
+        let closed = updater
+            .update_preview_state(
+                &workspace.workspace_id,
+                herdr_workbench_domain::PreviewStatus::Unavailable,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let opened = receiver.recv().await.unwrap();
+        assert_eq!(opened.event_type, EventType::PreviewStateUpdated);
+        assert_eq!(opened.revision, 0);
+        assert_eq!(
+            opened.payload,
+            EventPayload::PreviewStateUpdated(herdr_workbench_domain::PreviewStateUpdated {
+                session: session.clone()
+            })
+        );
+        let closed_event = receiver.recv().await.unwrap();
+        assert_eq!(closed_event.event_type, EventType::PreviewStateUpdated);
+        assert_eq!(closed_event.revision, 0);
         assert_eq!(closed.url.as_deref(), Some("http://localhost:3000/app"));
         assert_eq!(closed.title.as_deref(), Some("App"));
         assert_eq!(previews.revision(&workspace.workspace_id).await, 1);

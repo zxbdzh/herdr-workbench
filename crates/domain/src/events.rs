@@ -9,6 +9,7 @@ pub enum EventType {
     PreviewOpened,
     PreviewScreenshotCaptured,
     PreviewDiagnosticsUpdated,
+    PreviewStateUpdated,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,10 +28,16 @@ pub struct PreviewDiagnosticsUpdated {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewStateUpdated {
+    pub session: PreviewSession,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EventPayload {
     PreviewOpened(PreviewOpened),
     PreviewScreenshotCaptured(PreviewScreenshotCaptured),
     PreviewDiagnosticsUpdated(PreviewDiagnosticsUpdated),
+    PreviewStateUpdated(PreviewStateUpdated),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +88,17 @@ impl AppEvent {
             payload: EventPayload::PreviewDiagnosticsUpdated(PreviewDiagnosticsUpdated {
                 diagnostic,
             }),
+        }
+    }
+
+    pub fn preview_state_updated(session: PreviewSession) -> Self {
+        Self {
+            event_id: Uuid::now_v7(),
+            event_type: EventType::PreviewStateUpdated,
+            workspace_id: session.workspace_id.clone(),
+            occurred_at: Utc::now(),
+            revision: 0,
+            payload: EventPayload::PreviewStateUpdated(PreviewStateUpdated { session }),
         }
     }
 }

@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use herdr_workbench_app_core::{PreviewDiagnosticsSink, PreviewStateUpdater};
+use herdr_workbench_app_core::{
+    PreviewDiagnosticsSink, PreviewStateUpdater, PublishingPreviewStateUpdater,
+};
 use herdr_workbench_domain::{
     PreviewDiagnostic, PreviewDiagnosticKind, PreviewDiagnosticLevel, PreviewSession,
     PreviewStatus, WorkbenchWorkspaceId, Workspace,
@@ -646,8 +648,12 @@ pub fn run() {
                         sync_herdr_workspaces(repository.as_ref()).await;
                         spawn_herdr_reconcile(Arc::clone(&repository));
                         spawn_herdr_event_sync(Arc::clone(&repository));
-                        let state: Arc<dyn PreviewStateUpdater> = repository.clone();
                         let events = shared_event_bus();
+                        let state: Arc<dyn PreviewStateUpdater> =
+                            Arc::new(PublishingPreviewStateUpdater::new(
+                                repository.clone(),
+                                Arc::clone(&events),
+                            ));
                         let diagnostics = diagnostics_with_bus(Arc::clone(&events));
                         let preview_adapter = Arc::new(TauriWebViewPreviewAdapter::new(
                             handle,
