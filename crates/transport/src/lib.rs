@@ -1018,6 +1018,7 @@ mod tests {
         assert_eq!(state.revision, 0);
         assert_eq!(state.payload["preview_status"], "Open");
         assert_eq!(state.payload["preview_url"], "http://localhost:3000");
+        assert!(state.payload["preview_title"].is_null());
         assert!(state.payload.get("PreviewStateUpdated").is_none());
     }
 
