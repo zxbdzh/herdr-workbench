@@ -4,7 +4,10 @@ use std::{
 };
 
 use async_trait::async_trait;
-use herdr_workbench_app_core::{HerdrHost, HerdrHostError, HerdrPaneInfo, HerdrWorkspaceInfo};
+use herdr_workbench_app_core::{
+    HerdrEventSource, HerdrHost, HerdrHostError, HerdrLifecycleEvent, HerdrPaneInfo,
+    HerdrWorkspaceInfo,
+};
 use serde::Deserialize;
 use tokio::process::Command;
 
@@ -137,10 +140,176 @@ impl HerdrHost for HerdrCliHost {
     }
 }
 
+pub fn herdr_socket_path() -> PathBuf {
+    std::env::var_os("HERDR_SOCKET_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("APPDATA")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("herdr")
+                .join("herdr.sock")
+        })
+}
+
+pub fn windows_named_pipe_path(socket_path: &Path) -> PathBuf {
+    PathBuf::from(format!(r"\\.\pipe\{}", socket_path.display()))
+}
+
+#[derive(Debug, Deserialize)]
+struct SocketResultEnvelope {
+    #[serde(default)]
+    result: Option<SocketResultBody>,
+    #[serde(default)]
+    error: Option<SocketErrorBody>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SocketResultBody {
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SocketErrorBody {
+    message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SocketEventEnvelope {
+    event: String,
+}
+
+pub fn parse_subscription_ack(line: &str) -> Result<(), HerdrHostError> {
+    let envelope: SocketResultEnvelope = serde_json::from_str(line).map_err(|error| {
+        HerdrHostError::unavailable(format!("invalid herdr subscribe ack: {error}"))
+    })?;
+    if let Some(error) = envelope.error {
+        return Err(HerdrHostError::unavailable(
+            error
+                .message
+                .unwrap_or_else(|| "herdr subscribe failed".into()),
+        ));
+    }
+    match envelope.result {
+        Some(result) if result.kind == "subscription_started" => Ok(()),
+        Some(result) => Err(HerdrHostError::unavailable(format!(
+            "unexpected herdr subscribe ack: {}",
+            result.kind
+        ))),
+        None => Err(HerdrHostError::unavailable(
+            "herdr subscribe ack missing result",
+        )),
+    }
+}
+
+pub fn parse_lifecycle_event(line: &str) -> Result<Option<HerdrLifecycleEvent>, HerdrHostError> {
+    let envelope: SocketEventEnvelope = serde_json::from_str(line).map_err(|error| {
+        HerdrHostError::unavailable(format!("invalid herdr event JSON: {error}"))
+    })?;
+    Ok(match envelope.event.as_str() {
+        "workspace_created" => Some(HerdrLifecycleEvent::WorkspaceCreated),
+        "workspace_closed" => Some(HerdrLifecycleEvent::WorkspaceClosed),
+        "pane_created" => Some(HerdrLifecycleEvent::PaneCreated),
+        "pane_updated" => Some(HerdrLifecycleEvent::PaneUpdated),
+        _ => None,
+    })
+}
+
+type HerdrPipeReader = tokio::io::BufReader<tokio::net::windows::named_pipe::NamedPipeClient>;
+
+pub struct HerdrNamedPipeEventSource {
+    socket_path: PathBuf,
+    reader: tokio::sync::Mutex<Option<HerdrPipeReader>>,
+}
+
+impl HerdrNamedPipeEventSource {
+    pub fn from_env() -> Self {
+        Self {
+            socket_path: herdr_socket_path(),
+            reader: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    async fn ensure_reader(
+        &self,
+    ) -> Result<tokio::sync::MutexGuard<'_, Option<HerdrPipeReader>>, HerdrHostError> {
+        let mut guard = self.reader.lock().await;
+        if guard.is_none() {
+            let pipe = windows_named_pipe_path(&self.socket_path);
+            let client = tokio::net::windows::named_pipe::ClientOptions::new()
+                .open(&pipe)
+                .map_err(|error| {
+                    HerdrHostError::unavailable(format!(
+                        "failed to open Herdr named pipe {}: {error}",
+                        pipe.display()
+                    ))
+                })?;
+            let mut reader = tokio::io::BufReader::new(client);
+            use tokio::io::AsyncWriteExt;
+            let request = serde_json::json!({
+                "id": "workbench:events:subscribe",
+                "method": "events.subscribe",
+                "params": {
+                    "subscriptions": [
+                        {"type": "workspace.created"},
+                        {"type": "workspace.closed"},
+                        {"type": "pane.created"},
+                        {"type": "pane.updated"}
+                    ]
+                }
+            });
+            reader
+                .get_mut()
+                .write_all(format!("{request}\n").as_bytes())
+                .await
+                .map_err(|error| {
+                    HerdrHostError::unavailable(format!(
+                        "failed to subscribe to Herdr events: {error}"
+                    ))
+                })?;
+            let mut ack = String::new();
+            use tokio::io::AsyncBufReadExt;
+            reader.read_line(&mut ack).await.map_err(|error| {
+                HerdrHostError::unavailable(format!("failed to read Herdr subscribe ack: {error}"))
+            })?;
+            parse_subscription_ack(ack.trim_end())?;
+            *guard = Some(reader);
+        }
+        Ok(guard)
+    }
+}
+
+#[async_trait]
+impl HerdrEventSource for HerdrNamedPipeEventSource {
+    async fn next_event(&self) -> Result<HerdrLifecycleEvent, HerdrHostError> {
+        loop {
+            let mut guard = self.ensure_reader().await?;
+            let reader = guard.as_mut().expect("connected herdr pipe");
+            let mut line = String::new();
+            use tokio::io::AsyncBufReadExt;
+            let read = reader.read_line(&mut line).await.map_err(|error| {
+                HerdrHostError::unavailable(format!("failed to read Herdr event: {error}"))
+            })?;
+            if read == 0 {
+                *guard = None;
+                return Err(HerdrHostError::unavailable("Herdr event pipe closed"));
+            }
+            if let Some(event) = parse_lifecycle_event(line.trim_end())? {
+                return Ok(event);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse_pane_list, parse_workspace_list};
-    use std::path::PathBuf;
+    use super::{
+        parse_lifecycle_event, parse_pane_list, parse_subscription_ack, parse_workspace_list,
+        windows_named_pipe_path,
+    };
+    use herdr_workbench_app_core::HerdrLifecycleEvent;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn parse_workspace_list_reads_cli_envelope() {
@@ -175,5 +344,47 @@ mod tests {
                 .to_string()
                 .contains("invalid herdr workspace list JSON")
         );
+    }
+
+    #[test]
+    fn windows_pipe_path_prefixes_the_filesystem_socket_path() {
+        let socket = Path::new(r"C:\Users\1\AppData\Roaming\herdr\herdr.sock");
+        assert_eq!(
+            windows_named_pipe_path(socket),
+            PathBuf::from(r"\\.\pipe\C:\Users\1\AppData\Roaming\herdr\herdr.sock")
+        );
+    }
+
+    #[test]
+    fn parse_subscription_ack_accepts_subscription_started() {
+        parse_subscription_ack(r#"{"id":"sub_ws","result":{"type":"subscription_started"}}"#)
+            .unwrap();
+    }
+
+    #[test]
+    fn parse_subscription_ack_rejects_errors() {
+        let error = parse_subscription_ack(
+            r#"{"id":"sub_ws","error":{"code":"invalid_params","message":"bad subscription"}}"#,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("bad subscription"));
+    }
+
+    #[test]
+    fn parse_lifecycle_event_reads_workspace_created() {
+        let event = parse_lifecycle_event(
+            r#"{"event":"workspace_created","data":{"type":"workspace_created","workspace":{"workspace_id":"wZ"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(event, Some(HerdrLifecycleEvent::WorkspaceCreated));
+    }
+
+    #[test]
+    fn parse_lifecycle_event_ignores_unrelated_kinds() {
+        let event = parse_lifecycle_event(
+            r#"{"event":"workspace_focused","data":{"type":"workspace_focused","workspace_id":"wD"}}"#,
+        )
+        .unwrap();
+        assert_eq!(event, None);
     }
 }
