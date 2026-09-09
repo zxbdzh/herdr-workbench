@@ -223,6 +223,69 @@ where
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HerdrLifecycleEvent {
+    WorkspaceCreated,
+    WorkspaceClosed,
+    PaneCreated,
+    PaneUpdated,
+}
+
+impl HerdrLifecycleEvent {
+    pub fn should_sync(self) -> bool {
+        matches!(
+            self,
+            Self::WorkspaceCreated | Self::PaneCreated | Self::PaneUpdated
+        )
+    }
+}
+
+#[async_trait]
+pub trait HerdrEventSource: Send + Sync {
+    async fn next_event(&self) -> Result<HerdrLifecycleEvent, HerdrHostError>;
+}
+
+pub struct HerdrEventSyncLoop<R, H, E> {
+    repository: Arc<R>,
+    host: H,
+    events: E,
+}
+
+impl<R, H, E> HerdrEventSyncLoop<R, H, E>
+where
+    R: WorkspaceRepository,
+    H: HerdrHost,
+    E: HerdrEventSource,
+{
+    pub fn new(repository: Arc<R>, host: H, events: E) -> Self {
+        Self {
+            repository,
+            host,
+            events,
+        }
+    }
+
+    pub async fn step(&self) -> Result<bool, ApplicationError> {
+        let event = self.events.next_event().await?;
+        if !event.should_sync() {
+            return Ok(false);
+        }
+        SyncHerdrWorkspaces::new(self.repository.as_ref(), &self.host)
+            .execute()
+            .await?;
+        Ok(true)
+    }
+
+    pub async fn run(&self) {
+        loop {
+            if let Err(error) = self.step().await {
+                eprintln!("Herdr event sync skipped: {error}");
+                tokio::time::sleep(HERDR_RECONCILE_BACKOFF_INTERVAL).await;
+            }
+        }
+    }
+}
+
 #[async_trait]
 pub trait PreviewAdapter: Send + Sync {
     async fn open(
@@ -706,12 +769,13 @@ mod tests {
 
     use super::{
         BindWorkspace, CapturePreview, CapturedPreviewImage, EventBus,
-        HERDR_RECONCILE_BACKOFF_INTERVAL, HERDR_RECONCILE_OK_INTERVAL, HerdrHost, HerdrHostError,
-        HerdrPaneInfo, HerdrReconcileLoop, HerdrWorkspaceContext, HerdrWorkspaceInfo,
-        InMemoryPreviewDiagnostics, InMemoryPreviewRepository, InMemoryScreenshotStore,
-        InMemoryWorkspaceRepository, OpenPreview, PreviewAdapter, PreviewDiagnosticsSink,
-        PreviewError, PreviewScreenshotRepository, PreviewStateUpdater, ReconcileSleeper,
-        ScreenshotStore, SyncHerdrWorkspaces, WorkspaceRepository,
+        HERDR_RECONCILE_BACKOFF_INTERVAL, HERDR_RECONCILE_OK_INTERVAL, HerdrEventSource,
+        HerdrEventSyncLoop, HerdrHost, HerdrHostError, HerdrLifecycleEvent, HerdrPaneInfo,
+        HerdrReconcileLoop, HerdrWorkspaceContext, HerdrWorkspaceInfo, InMemoryPreviewDiagnostics,
+        InMemoryPreviewRepository, InMemoryScreenshotStore, InMemoryWorkspaceRepository,
+        OpenPreview, PreviewAdapter, PreviewDiagnosticsSink, PreviewError,
+        PreviewScreenshotRepository, PreviewStateUpdater, ReconcileSleeper, ScreenshotStore,
+        SyncHerdrWorkspaces, WorkspaceRepository,
     };
     use async_trait::async_trait;
     use herdr_workbench_domain::{
@@ -1357,5 +1421,80 @@ mod tests {
             ]
         );
         assert_eq!(repository.workspace_count().await, 1);
+    }
+
+    #[derive(Clone)]
+    struct FakeEventSource {
+        events: Arc<std::sync::Mutex<Vec<Result<HerdrLifecycleEvent, HerdrHostError>>>>,
+    }
+
+    #[async_trait]
+    impl HerdrEventSource for FakeEventSource {
+        async fn next_event(&self) -> Result<HerdrLifecycleEvent, HerdrHostError> {
+            let mut events = self.events.lock().unwrap();
+            if events.is_empty() {
+                return Err(HerdrHostError::unavailable("no more herdr events"));
+            }
+            events.remove(0)
+        }
+    }
+
+    fn sample_bindable_host() -> FakeHerdrHost {
+        FakeHerdrHost {
+            workspaces: vec![sample_host_workspace("wD", "code")],
+            panes: vec![sample_pane("wD", r"D:\Code\huajingweb", true)],
+            error: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_created_event_syncs_new_bindings() {
+        let repository = Arc::new(InMemoryWorkspaceRepository::default());
+        let events = FakeEventSource {
+            events: Arc::new(std::sync::Mutex::new(vec![Ok(
+                HerdrLifecycleEvent::WorkspaceCreated,
+            )])),
+        };
+        let synced =
+            HerdrEventSyncLoop::new(Arc::clone(&repository), sample_bindable_host(), events)
+                .step()
+                .await
+                .unwrap();
+        assert!(synced);
+        assert_eq!(repository.workspace_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn workspace_closed_event_does_not_unbind_or_sync() {
+        let repository = Arc::new(InMemoryWorkspaceRepository::default());
+        let events = FakeEventSource {
+            events: Arc::new(std::sync::Mutex::new(vec![Ok(
+                HerdrLifecycleEvent::WorkspaceClosed,
+            )])),
+        };
+        let synced =
+            HerdrEventSyncLoop::new(Arc::clone(&repository), sample_bindable_host(), events)
+                .step()
+                .await
+                .unwrap();
+        assert!(!synced);
+        assert_eq!(repository.workspace_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn event_source_failure_does_not_panic_or_bind() {
+        let repository = Arc::new(InMemoryWorkspaceRepository::default());
+        let events = FakeEventSource {
+            events: Arc::new(std::sync::Mutex::new(vec![Err(
+                HerdrHostError::unavailable("pipe closed"),
+            )])),
+        };
+        let error =
+            HerdrEventSyncLoop::new(Arc::clone(&repository), sample_bindable_host(), events)
+                .step()
+                .await
+                .unwrap_err();
+        assert!(matches!(error, super::ApplicationError::Herdr(_)));
+        assert_eq!(repository.workspace_count().await, 0);
     }
 }

@@ -1,10 +1,11 @@
 use std::{env, fs, net::SocketAddr, path::PathBuf, sync::Arc};
 
-use herdr_workbench_adapters_herdr::HerdrCliHost;
+use herdr_workbench_adapters_herdr::{HerdrCliHost, HerdrNamedPipeEventSource};
 use herdr_workbench_adapters_sqlite::{FilesystemScreenshotStore, SqliteWorkspaceRepository};
 use herdr_workbench_app_core::{
-    EventBus, EventPublisher, HerdrReconcileLoop, InMemoryPreviewDiagnostics, PreviewAdapter,
-    PreviewDiagnosticsSink, SyncHerdrWorkspaces, TokioReconcileSleeper, WorkspaceRepository,
+    EventBus, EventPublisher, HerdrEventSyncLoop, HerdrReconcileLoop, InMemoryPreviewDiagnostics,
+    PreviewAdapter, PreviewDiagnosticsSink, SyncHerdrWorkspaces, TokioReconcileSleeper,
+    WorkspaceRepository,
 };
 use herdr_workbench_transport::{AppState, router};
 use thiserror::Error;
@@ -96,6 +97,21 @@ where
     });
 }
 
+pub fn spawn_herdr_event_sync<R>(repository: Arc<R>)
+where
+    R: WorkspaceRepository + 'static,
+{
+    tokio::spawn(async move {
+        HerdrEventSyncLoop::new(
+            repository,
+            HerdrCliHost::from_env(),
+            HerdrNamedPipeEventSource::from_env(),
+        )
+        .run()
+        .await;
+    });
+}
+
 pub async fn serve<A>(preview_adapter: Arc<A>) -> Result<(), ServerError>
 where
     A: PreviewAdapter + 'static,
@@ -103,6 +119,7 @@ where
     let repository = connect_repository().await?;
     sync_herdr_workspaces(repository.as_ref()).await;
     spawn_herdr_reconcile(Arc::clone(&repository));
+    spawn_herdr_event_sync(Arc::clone(&repository));
     let events = shared_event_bus();
     let diagnostics = diagnostics_with_bus(Arc::clone(&events));
     serve_with_repository(repository, preview_adapter, diagnostics, events).await
