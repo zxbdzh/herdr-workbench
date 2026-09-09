@@ -8,34 +8,29 @@ interface WorkspaceListResponse { workspaces: Workspace[]; }
 interface PreviewState { preview_session_id: string | null; preview_url: string | null; preview_status: string | null; preview_title?: string | null; }
 interface PreviewDiagnostic { kind: string; level: string; message: string; source: string | null; status: number | null; occurred_at: string; }
 interface PreviewDiagnosticsResponse { diagnostics: PreviewDiagnostic[]; }
-interface WorkspaceEventEnvelope { event_type: string; payload?: { preview_session_id?: string | null; preview_url?: string | null; preview_status?: string | null; preview_title?: string | null; PreviewOpened?: { session?: PreviewSessionPayload }; PreviewStateUpdated?: { session?: PreviewSessionPayload }; session?: PreviewSessionPayload; }; }
-interface PreviewSessionPayload { session_id?: string; url?: string | null; title?: string | null; status?: string; }
+interface WorkspaceEventEnvelope {
+  event_type: string;
+  payload?: {
+    preview_session_id?: string | null;
+    preview_url?: string | null;
+    preview_status?: string | null;
+    preview_title?: string | null;
+  };
+}
 interface ApiError { error?: { code?: string; message?: string }; }
 
-const previewFromSession = (session: PreviewSessionPayload | undefined): PreviewState | null => {
-  if (!session) return null;
-  return {
-    preview_session_id: session.session_id ?? null,
-    preview_url: session.url ?? null,
-    preview_status: session.status ?? null,
-    preview_title: session.title ?? null,
-  };
-};
-
 const previewFromEnvelope = (event: WorkspaceEventEnvelope): PreviewState | null => {
-  if (event.event_type === "workspace.snapshot") {
+  if (
+    event.event_type === "workspace.snapshot" ||
+    event.event_type === "preview.opened" ||
+    event.event_type === "preview.state_updated"
+  ) {
     return {
       preview_session_id: event.payload?.preview_session_id ?? null,
       preview_url: event.payload?.preview_url ?? null,
       preview_status: event.payload?.preview_status ?? null,
       preview_title: event.payload?.preview_title ?? null,
     };
-  }
-  if (event.event_type === "preview.opened") {
-    return previewFromSession(event.payload?.PreviewOpened?.session ?? event.payload?.session);
-  }
-  if (event.event_type === "preview.state_updated") {
-    return previewFromSession(event.payload?.PreviewStateUpdated?.session ?? event.payload?.session);
   }
   return null;
 };

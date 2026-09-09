@@ -52,12 +52,32 @@ impl PreviewStateResponse {
         workspace: herdr_workbench_domain::Workspace,
         preview: Option<herdr_workbench_domain::PreviewSession>,
     ) -> Self {
+        let preview = preview.map(PreviewSessionDto::from);
         Self {
             workspace: WorkspaceDto::from(workspace),
-            preview_session_id: preview.as_ref().map(|p| p.session_id.as_uuid().to_string()),
-            preview_url: preview.as_ref().and_then(|p| p.url.clone()),
-            preview_status: preview.as_ref().map(|p| format!("{:?}", p.status)),
-            preview_title: preview.and_then(|p| p.title),
+            preview_session_id: preview.as_ref().map(|p| p.preview_session_id.clone()),
+            preview_url: preview.as_ref().and_then(|p| p.preview_url.clone()),
+            preview_status: preview.as_ref().map(|p| p.preview_status.clone()),
+            preview_title: preview.and_then(|p| p.preview_title),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct PreviewSessionDto {
+    pub preview_session_id: String,
+    pub preview_url: Option<String>,
+    pub preview_status: String,
+    pub preview_title: Option<String>,
+}
+
+impl From<herdr_workbench_domain::PreviewSession> for PreviewSessionDto {
+    fn from(session: herdr_workbench_domain::PreviewSession) -> Self {
+        Self {
+            preview_session_id: session.session_id.as_uuid().to_string(),
+            preview_url: session.url,
+            preview_status: format!("{:?}", session.status),
+            preview_title: session.title,
         }
     }
 }
@@ -143,15 +163,27 @@ impl WorkspaceEventEnvelope {
     }
 
     pub fn from_app_event(event: herdr_workbench_domain::AppEvent) -> Self {
-        let event_type = match event.event_type {
-            herdr_workbench_domain::EventType::PreviewOpened => "preview.opened",
-            herdr_workbench_domain::EventType::PreviewScreenshotCaptured => {
-                "preview.screenshot_captured"
-            }
-            herdr_workbench_domain::EventType::PreviewDiagnosticsUpdated => {
-                "preview.diagnostics_updated"
-            }
-            herdr_workbench_domain::EventType::PreviewStateUpdated => "preview.state_updated",
+        let (event_type, payload) = match event.payload {
+            herdr_workbench_domain::EventPayload::PreviewOpened(opened) => (
+                "preview.opened",
+                serde_json::to_value(PreviewSessionDto::from(opened.session))
+                    .unwrap_or(Value::Null),
+            ),
+            herdr_workbench_domain::EventPayload::PreviewScreenshotCaptured(captured) => (
+                "preview.screenshot_captured",
+                serde_json::to_value(PreviewScreenshotResponse::from(captured.screenshot))
+                    .unwrap_or(Value::Null),
+            ),
+            herdr_workbench_domain::EventPayload::PreviewDiagnosticsUpdated(updated) => (
+                "preview.diagnostics_updated",
+                serde_json::to_value(PreviewDiagnosticDto::from(updated.diagnostic))
+                    .unwrap_or(Value::Null),
+            ),
+            herdr_workbench_domain::EventPayload::PreviewStateUpdated(updated) => (
+                "preview.state_updated",
+                serde_json::to_value(PreviewSessionDto::from(updated.session))
+                    .unwrap_or(Value::Null),
+            ),
         };
         Self {
             event_id: event.event_id.to_string(),
@@ -159,7 +191,7 @@ impl WorkspaceEventEnvelope {
             workspace_id: event.workspace_id.as_uuid().to_string(),
             occurred_at: event.occurred_at.to_rfc3339(),
             revision: event.revision,
-            payload: serde_json::to_value(&event.payload).unwrap_or(Value::Null),
+            payload,
         }
     }
 }
@@ -181,7 +213,7 @@ pub struct ErrorBody {
     paths(health, list_workspaces, get_workspace_state, open_preview, capture_preview_screenshot, get_preview_screenshot, get_preview_diagnostics, workspace_events),
     components(schemas(
         HealthResponse, WorkspaceDto, WorkspaceListResponse, PreviewOpenRequest,
-        PreviewStateResponse, PreviewScreenshotResponse, PreviewDiagnosticDto, PreviewDiagnosticsResponse, WorkspaceEventEnvelope, ErrorResponse, ErrorBody
+        PreviewStateResponse, PreviewSessionDto, PreviewScreenshotResponse, PreviewDiagnosticDto, PreviewDiagnosticsResponse, WorkspaceEventEnvelope, ErrorResponse, ErrorBody
     )),
     tags((name = "system", description = "Workbench system endpoints"))
 )]
