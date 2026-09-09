@@ -151,6 +151,7 @@ impl WorkspaceEventEnvelope {
             herdr_workbench_domain::EventType::PreviewDiagnosticsUpdated => {
                 "preview.diagnostics_updated"
             }
+            herdr_workbench_domain::EventType::PreviewStateUpdated => "preview.state_updated",
         };
         Self {
             event_id: event.event_id.to_string(),

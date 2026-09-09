@@ -5,7 +5,7 @@ pub mod preview;
 
 pub use events::{
     AppEvent, EventPayload, EventType, PreviewDiagnosticsUpdated, PreviewOpened,
-    PreviewScreenshotCaptured,
+    PreviewScreenshotCaptured, PreviewStateUpdated,
 };
 pub use preview::{
     PreviewDiagnostic, PreviewDiagnosticKind, PreviewDiagnosticLevel, PreviewScreenshot,
