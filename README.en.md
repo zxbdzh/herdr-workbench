@@ -40,7 +40,7 @@ v0.1 covers this local loop. LAN / phone / file editing are not in this release.
 
 Requires Windows 10/11 and [Herdr](https://herdr.dev) on the same machine.
 
-1. Download `Herdr Workbench_0.1.2_x64-setup.exe` from [Releases](https://github.com/zxbdzh/herdr-workbench/releases)
+1. Download `Herdr Workbench_0.1.3_x64-setup.exe` from [Releases](https://github.com/zxbdzh/herdr-workbench/releases)
 2. Install and launch
 3. Start Herdr first, then Workbench; the workspace list syncs from local Herdr
 
