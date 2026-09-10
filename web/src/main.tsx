@@ -1,6 +1,7 @@
 import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
+import { nextWorkspaceSocketAction } from "./workspaceSocket";
 
 interface HealthResponse { status: string; }
 interface Workspace { workspace_id: string; herdr_workspace_id: string; label: string; cwd: string; revision: number; }
@@ -65,23 +66,62 @@ function App() {
 
   useEffect(() => {
     if (!workspaces?.length) return;
-    const sockets = workspaces.map((workspace) => {
-      const socket = new WebSocket(workspaceSocketUrl(workspace.workspace_id));
-      socket.onmessage = (message) => {
-        const event = JSON.parse(message.data) as WorkspaceEventEnvelope;
-        if (event.event_type === "resync") {
-          api<PreviewState>(`/api/v1/workspaces/${workspace.workspace_id}/state`)
-            .then((preview) => setPreviews((current) => ({ ...current, [workspace.workspace_id]: preview })))
-            .catch((reason: Error) => setError(reason.message));
-          return;
-        }
-        const preview = previewFromEnvelope(event);
-        if (preview) setPreviews((current) => ({ ...current, [workspace.workspace_id]: preview }));
+    const subscriptions = workspaces.map((workspace) => {
+      let socket: WebSocket | null = null;
+      let timer: number | undefined;
+      let stopped = false;
+
+      const refresh = () => {
+        api<PreviewState>(`/api/v1/workspaces/${workspace.workspace_id}/state`)
+          .then((preview) => setPreviews((current) => ({ ...current, [workspace.workspace_id]: preview })))
+          .catch((reason: Error) => setError(reason.message));
       };
-      socket.onerror = () => setError("无法订阅 Preview 状态");
-      return socket;
+
+      const connect = () => {
+        if (stopped) return;
+        if (timer !== undefined) {
+          window.clearTimeout(timer);
+          timer = undefined;
+        }
+        const previous = socket;
+        const next = new WebSocket(workspaceSocketUrl(workspace.workspace_id));
+        socket = next;
+        if (previous && previous !== next) {
+          previous.onclose = null;
+          previous.close();
+        }
+        next.onmessage = (message) => {
+          const event = JSON.parse(message.data) as WorkspaceEventEnvelope;
+          if (event.event_type === "resync") {
+            if (nextWorkspaceSocketAction("resync", stopped)?.type === "query-state") {
+              refresh();
+            }
+            return;
+          }
+          const preview = previewFromEnvelope(event);
+          if (preview) setPreviews((current) => ({ ...current, [workspace.workspace_id]: preview }));
+        };
+        next.onerror = () => {
+          if (!stopped && socket === next) setError("无法订阅 Preview 状态");
+        };
+        next.onclose = () => {
+          if (stopped || socket !== next) return;
+          const action = nextWorkspaceSocketAction("close", false);
+          if (action?.type !== "reconnect") return;
+          refresh();
+          if (timer !== undefined) window.clearTimeout(timer);
+          timer = window.setTimeout(connect, action.delayMs);
+        };
+      };
+
+      connect();
+      return () => {
+        stopped = true;
+        if (timer !== undefined) window.clearTimeout(timer);
+        socket?.close();
+      };
     });
-    return () => sockets.forEach((socket) => socket.close());
+    return () => subscriptions.forEach((stop) => stop());
   }, [workspaces]);
 
   const openPreview = async (workspace: Workspace) => {
