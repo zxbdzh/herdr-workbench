@@ -643,29 +643,27 @@ pub fn ui_origin() -> Url {
 }
 
 fn open_console_on_api_origin(app: &AppHandle) {
-    let Some(window) = app.get_webview_window("main") else {
-        eprintln!("Workbench main window was not found");
-        return;
-    };
-    if let Err(error) = window.navigate(ui_origin()) {
-        eprintln!("failed to open Workbench UI on localhost: {error}");
-        return;
-    }
-    let _ = window.show();
-    let _ = window.set_focus();
+    let handle = app.clone();
+    let _ = handle.clone().run_on_main_thread(move || {
+        let Some(window) = handle.get_webview_window("main") else {
+            eprintln!("Workbench main window was not found");
+            return;
+        };
+        if let Err(error) = window.navigate(ui_origin()) {
+            eprintln!("failed to open Workbench UI on localhost: {error}");
+        }
+        let _ = window.show();
+        let _ = window.set_focus();
+    });
 }
 
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let handle = app.handle().clone();
-            if let Some(window) = handle.get_webview_window("main") {
-                let _ = window.hide();
-            }
             tauri::async_runtime::spawn(async move {
                 match connect_repository().await {
                     Ok(repository) => {
-                        sync_herdr_workspaces(repository.as_ref()).await;
                         spawn_herdr_reconcile(Arc::clone(&repository));
                         spawn_herdr_event_sync(Arc::clone(&repository));
                         let events = shared_event_bus();
@@ -680,6 +678,10 @@ pub fn run() {
                             state,
                             Arc::clone(&diagnostics),
                         ));
+                        let sync_repository = Arc::clone(&repository);
+                        tauri::async_runtime::spawn(async move {
+                            sync_herdr_workspaces(sync_repository.as_ref()).await;
+                        });
                         if let Err(error) = serve_with_repository_ready(
                             repository,
                             preview_adapter,
