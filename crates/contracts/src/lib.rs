@@ -33,9 +33,21 @@ pub struct WorkspaceListResponse {
     pub workspaces: Vec<WorkspaceDto>,
 }
 
-#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Deserialize, ToSchema, Default)]
 pub struct PreviewOpenRequest {
     pub url: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, ToSchema, Default)]
+pub struct PreviewContextSendRequest {
+    pub note: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct PreviewContextSendResponse {
+    pub pane_id: String,
+    pub agent: String,
+    pub accepted: bool,
 }
 
 #[derive(Clone, Debug, Serialize, ToSchema)]
@@ -221,9 +233,10 @@ pub struct ErrorBody {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(health, list_workspaces, get_workspace_state, open_preview, capture_preview_screenshot, get_preview_screenshot, get_preview_diagnostics, workspace_events),
+    paths(health, list_workspaces, get_workspace_state, open_preview, capture_preview_screenshot, get_preview_screenshot, get_preview_diagnostics, send_preview_context, workspace_events),
     components(schemas(
         HealthResponse, WorkspaceDto, WorkspaceListResponse, PreviewOpenRequest,
+        PreviewContextSendRequest, PreviewContextSendResponse,
         PreviewStateResponse, PreviewSessionDto, PreviewScreenshotResponse, PreviewDiagnosticDto, PreviewDiagnosticsResponse, WorkspaceEventEnvelope, ErrorResponse, ErrorBody
     )),
     tags((name = "system", description = "Workbench system endpoints"))
@@ -276,6 +289,15 @@ pub fn get_preview_screenshot() {}
     responses((status = 200, body = PreviewDiagnosticsResponse), (status = 404, body = ErrorResponse))
 )]
 pub fn get_preview_diagnostics() {}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{id}/context/send",
+    params(("id" = String, Path, description = "Workbench workspace ID")),
+    request_body = PreviewContextSendRequest,
+    responses((status = 200, body = PreviewContextSendResponse), (status = 404, body = ErrorResponse), (status = 503, body = ErrorResponse))
+)]
+pub fn send_preview_context() {}
 
 #[utoipa::path(
     get,

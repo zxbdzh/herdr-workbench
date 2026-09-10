@@ -30,6 +30,37 @@ pub trait HerdrHost: Send + Sync {
     async fn list_panes(&self) -> Result<Vec<HerdrPaneInfo>, HerdrHostError>;
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HerdrAgentInfo {
+    pub workspace_id: String,
+    pub pane_id: String,
+    pub agent: String,
+    pub status: String,
+    pub focused: bool,
+}
+
+#[async_trait]
+pub trait HerdrAgentBridge: Send + Sync {
+    async fn list_agents(&self) -> Result<Vec<HerdrAgentInfo>, HerdrHostError>;
+    async fn prompt_agent(&self, target: &str, text: &str) -> Result<(), HerdrHostError>;
+}
+
+#[derive(Debug, Default)]
+pub struct UnavailableAgentBridge;
+
+#[async_trait]
+impl HerdrAgentBridge for UnavailableAgentBridge {
+    async fn list_agents(&self) -> Result<Vec<HerdrAgentInfo>, HerdrHostError> {
+        Ok(Vec::new())
+    }
+
+    async fn prompt_agent(&self, _: &str, _: &str) -> Result<(), HerdrHostError> {
+        Err(HerdrHostError::unavailable(
+            "Herdr agent bridge is not configured",
+        ))
+    }
+}
+
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 #[error("Herdr host is unavailable: {message}")]
 pub struct HerdrHostError {
@@ -590,6 +621,140 @@ where
     }
 }
 
+pub const PREVIEW_CONTEXT_DIAGNOSTIC_LIMIT: usize = 20;
+pub const PREVIEW_CONTEXT_NOTE_LIMIT: usize = 500;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreviewContextReceipt {
+    pub pane_id: String,
+    pub agent: String,
+}
+
+pub struct SendPreviewContext<'a, P, D: ?Sized, A: ?Sized> {
+    previews: &'a P,
+    diagnostics: &'a D,
+    agents: &'a A,
+}
+
+impl<'a, P, D, A> SendPreviewContext<'a, P, D, A>
+where
+    P: PreviewTransactionRepository + PreviewScreenshotRepository,
+    D: PreviewDiagnosticsSink + ?Sized,
+    A: HerdrAgentBridge + ?Sized,
+{
+    pub fn new(previews: &'a P, diagnostics: &'a D, agents: &'a A) -> Self {
+        Self {
+            previews,
+            diagnostics,
+            agents,
+        }
+    }
+
+    pub async fn execute(
+        &self,
+        workspace: &Workspace,
+        note: Option<String>,
+    ) -> Result<PreviewContextReceipt, ApplicationError> {
+        let session = self
+            .previews
+            .find_by_workspace(&workspace.workspace_id)
+            .await?;
+        let screenshot = self.previews.find_latest(&workspace.workspace_id).await?;
+        let diagnostics = self.diagnostics.list(&workspace.workspace_id).await;
+        let agents = self.agents.list_agents().await?;
+        let selected = select_agent_for_workspace(workspace.herdr_workspace_id.as_str(), &agents)
+            .ok_or_else(|| {
+            HerdrHostError::unavailable("no Herdr agent is running in this workspace")
+        })?;
+        let text = render_preview_context(
+            workspace,
+            session.as_ref(),
+            screenshot.as_ref(),
+            &diagnostics,
+            note.as_deref(),
+        );
+        self.agents.prompt_agent(&selected.pane_id, &text).await?;
+        Ok(PreviewContextReceipt {
+            pane_id: selected.pane_id.clone(),
+            agent: selected.agent.clone(),
+        })
+    }
+}
+
+pub fn select_agent_for_workspace<'a>(
+    herdr_workspace_id: &str,
+    agents: &'a [HerdrAgentInfo],
+) -> Option<&'a HerdrAgentInfo> {
+    let local: Vec<&HerdrAgentInfo> = agents
+        .iter()
+        .filter(|agent| agent.workspace_id == herdr_workspace_id)
+        .collect();
+    local
+        .iter()
+        .copied()
+        .find(|agent| agent.focused)
+        .or_else(|| {
+            local
+                .iter()
+                .copied()
+                .find(|agent| agent.status.eq_ignore_ascii_case("idle"))
+        })
+        .or_else(|| local.first().copied())
+}
+
+pub fn render_preview_context(
+    workspace: &Workspace,
+    session: Option<&PreviewSession>,
+    screenshot: Option<&PreviewScreenshot>,
+    diagnostics: &[PreviewDiagnostic],
+    note: Option<&str>,
+) -> String {
+    let mut lines = vec![
+        "[Herdr Workbench Preview feedback]".to_owned(),
+        format!("workspace: {}", workspace.label),
+        format!("cwd: {}", workspace.cwd.display()),
+        format!(
+            "url: {}",
+            session.and_then(|item| item.url.as_deref()).unwrap_or("-")
+        ),
+        format!(
+            "title: {}",
+            session
+                .and_then(|item| item.title.as_deref())
+                .unwrap_or("-")
+        ),
+        format!(
+            "status: {}",
+            session
+                .map(|item| format!("{:?}", item.status))
+                .unwrap_or_else(|| "-".into())
+        ),
+    ];
+    match screenshot {
+        Some(shot) => lines.push(format!(
+            "screenshot: sha256={} bytes={} path={}",
+            shot.sha256, shot.byte_size, shot.path
+        )),
+        None => lines.push("screenshot: none".into()),
+    }
+    if let Some(note) = note.map(str::trim).filter(|value| !value.is_empty()) {
+        let clipped: String = note.chars().take(PREVIEW_CONTEXT_NOTE_LIMIT).collect();
+        lines.push(format!("note: {clipped}"));
+    }
+    lines.push("diagnostics:".into());
+    if diagnostics.is_empty() {
+        lines.push("- none".into());
+    } else {
+        for item in diagnostics.iter().take(PREVIEW_CONTEXT_DIAGNOSTIC_LIMIT) {
+            lines.push(format!(
+                "- {:?} {:?} {}",
+                item.level, item.kind, item.message
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(bytes);
@@ -834,13 +999,14 @@ mod tests {
 
     use super::{
         BindWorkspace, CapturePreview, CapturedPreviewImage, EventBus,
-        HERDR_RECONCILE_BACKOFF_INTERVAL, HERDR_RECONCILE_OK_INTERVAL, HerdrEventSource,
-        HerdrEventSyncLoop, HerdrHost, HerdrHostError, HerdrLifecycleEvent, HerdrPaneInfo,
-        HerdrReconcileLoop, HerdrWorkspaceContext, HerdrWorkspaceInfo, InMemoryPreviewDiagnostics,
-        InMemoryPreviewRepository, InMemoryScreenshotStore, InMemoryWorkspaceRepository,
-        OpenPreview, PreviewAdapter, PreviewDiagnosticsSink, PreviewError,
-        PreviewScreenshotRepository, PreviewStateUpdater, PublishingPreviewStateUpdater,
-        ReconcileSleeper, ScreenshotStore, SyncHerdrWorkspaces, WorkspaceRepository,
+        HERDR_RECONCILE_BACKOFF_INTERVAL, HERDR_RECONCILE_OK_INTERVAL, HerdrAgentBridge,
+        HerdrAgentInfo, HerdrEventSource, HerdrEventSyncLoop, HerdrHost, HerdrHostError,
+        HerdrLifecycleEvent, HerdrPaneInfo, HerdrReconcileLoop, HerdrWorkspaceContext,
+        HerdrWorkspaceInfo, InMemoryPreviewDiagnostics, InMemoryPreviewRepository,
+        InMemoryScreenshotStore, InMemoryWorkspaceRepository, OpenPreview, PreviewAdapter,
+        PreviewDiagnosticsSink, PreviewError, PreviewScreenshotRepository, PreviewStateUpdater,
+        PublishingPreviewStateUpdater, ReconcileSleeper, ScreenshotStore, SendPreviewContext,
+        SyncHerdrWorkspaces, WorkspaceRepository,
     };
     use async_trait::async_trait;
     use herdr_workbench_domain::{
@@ -1620,5 +1786,135 @@ mod tests {
                 .unwrap_err();
         assert!(matches!(error, super::ApplicationError::Herdr(_)));
         assert_eq!(repository.workspace_count().await, 0);
+    }
+
+    #[derive(Default)]
+    struct FakeAgentBridge {
+        agents: Vec<HerdrAgentInfo>,
+        prompts: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    }
+
+    #[async_trait]
+    impl HerdrAgentBridge for FakeAgentBridge {
+        async fn list_agents(&self) -> Result<Vec<HerdrAgentInfo>, HerdrHostError> {
+            Ok(self.agents.clone())
+        }
+
+        async fn prompt_agent(&self, target: &str, text: &str) -> Result<(), HerdrHostError> {
+            self.prompts
+                .lock()
+                .unwrap()
+                .push((target.to_owned(), text.to_owned()));
+            Ok(())
+        }
+    }
+
+    fn sample_agent(
+        workspace_id: &str,
+        pane_id: &str,
+        focused: bool,
+        status: &str,
+    ) -> HerdrAgentInfo {
+        HerdrAgentInfo {
+            workspace_id: workspace_id.into(),
+            pane_id: pane_id.into(),
+            agent: "pi".into(),
+            status: status.into(),
+            focused,
+        }
+    }
+
+    #[tokio::test]
+    async fn sending_preview_context_prompts_the_focused_agent() {
+        let workspaces = InMemoryWorkspaceRepository::default();
+        let workspace = BindWorkspace::new(&workspaces)
+            .execute(
+                HerdrWorkspaceContext::new(
+                    "herdr-1",
+                    "Siftmark",
+                    PathBuf::from(r"C:\projects\siftmark"),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let previews = InMemoryPreviewRepository::default();
+        let events = EventBus::new(8);
+        OpenPreview::new(&previews, &FakePreviewAdapter, &events)
+            .execute(&workspace, Some("http://localhost:3000".into()))
+            .await
+            .unwrap();
+        CapturePreview::new(
+            &previews,
+            &FakePreviewAdapter,
+            &events,
+            &InMemoryScreenshotStore::default(),
+        )
+        .execute(&workspace)
+        .await
+        .unwrap();
+        let diagnostics = InMemoryPreviewDiagnostics::default();
+        diagnostics
+            .record(PreviewDiagnostic {
+                workspace_id: workspace.workspace_id.clone(),
+                kind: PreviewDiagnosticKind::Console,
+                level: PreviewDiagnosticLevel::Error,
+                message: "boom".into(),
+                source: None,
+                status: None,
+                occurred_at: chrono::Utc::now(),
+            })
+            .await;
+        let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let agents = FakeAgentBridge {
+            agents: vec![
+                sample_agent("other", "wX:p1", true, "idle"),
+                sample_agent("herdr-1", "w1:p2", false, "working"),
+                sample_agent("herdr-1", "w1:p1", true, "idle"),
+            ],
+            prompts: Arc::clone(&prompts),
+        };
+        let receipt = SendPreviewContext::new(&previews, &diagnostics, &agents)
+            .execute(&workspace, Some("please check the header".into()))
+            .await
+            .unwrap();
+        assert_eq!(receipt.pane_id, "w1:p1");
+        assert_eq!(receipt.agent, "pi");
+        let recorded = prompts.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, "w1:p1");
+        assert!(recorded[0].1.contains("http://localhost:3000"));
+        assert!(recorded[0].1.contains("boom"));
+        assert!(recorded[0].1.contains("please check the header"));
+        assert!(!recorded[0].1.contains('\u{89}'));
+    }
+
+    #[tokio::test]
+    async fn sending_preview_context_without_an_agent_does_not_prompt() {
+        let workspaces = InMemoryWorkspaceRepository::default();
+        let workspace = BindWorkspace::new(&workspaces)
+            .execute(
+                HerdrWorkspaceContext::new(
+                    "herdr-1",
+                    "Siftmark",
+                    PathBuf::from(r"C:\projects\siftmark"),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let previews = InMemoryPreviewRepository::default();
+        let diagnostics = InMemoryPreviewDiagnostics::default();
+        let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let agents = FakeAgentBridge {
+            agents: vec![sample_agent("other", "wX:p1", true, "idle")],
+            prompts: Arc::clone(&prompts),
+        };
+        let error = SendPreviewContext::new(&previews, &diagnostics, &agents)
+            .execute(&workspace, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, super::ApplicationError::Herdr(_)));
+        assert!(prompts.lock().unwrap().is_empty());
     }
 }

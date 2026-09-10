@@ -5,8 +5,8 @@ use std::{
 
 use async_trait::async_trait;
 use herdr_workbench_app_core::{
-    HerdrEventSource, HerdrHost, HerdrHostError, HerdrLifecycleEvent, HerdrPaneInfo,
-    HerdrWorkspaceInfo,
+    HerdrAgentBridge, HerdrAgentInfo, HerdrEventSource, HerdrHost, HerdrHostError,
+    HerdrLifecycleEvent, HerdrPaneInfo, HerdrWorkspaceInfo,
 };
 use serde::Deserialize;
 use tokio::process::Command;
@@ -137,6 +137,53 @@ impl HerdrHost for HerdrCliHost {
     async fn list_panes(&self) -> Result<Vec<HerdrPaneInfo>, HerdrHostError> {
         let stdout = run_herdr(&self.binary, &["pane", "list"]).await?;
         parse_pane_list(&stdout)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentListResult {
+    agents: Vec<CliAgent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CliAgent {
+    workspace_id: String,
+    pane_id: String,
+    agent: String,
+    #[serde(default, alias = "agent_status")]
+    status: Option<String>,
+    #[serde(default)]
+    focused: bool,
+}
+
+pub fn parse_agent_list(stdout: &str) -> Result<Vec<HerdrAgentInfo>, HerdrHostError> {
+    let envelope: CliEnvelope<AgentListResult> = serde_json::from_str(stdout).map_err(|error| {
+        HerdrHostError::unavailable(format!("invalid herdr agent list JSON: {error}"))
+    })?;
+    Ok(envelope
+        .result
+        .agents
+        .into_iter()
+        .map(|agent| HerdrAgentInfo {
+            workspace_id: agent.workspace_id,
+            pane_id: agent.pane_id,
+            agent: agent.agent,
+            status: agent.status.unwrap_or_default(),
+            focused: agent.focused,
+        })
+        .collect())
+}
+
+#[async_trait]
+impl HerdrAgentBridge for HerdrCliHost {
+    async fn list_agents(&self) -> Result<Vec<HerdrAgentInfo>, HerdrHostError> {
+        let stdout = run_herdr(&self.binary, &["agent", "list"]).await?;
+        parse_agent_list(&stdout)
+    }
+
+    async fn prompt_agent(&self, target: &str, text: &str) -> Result<(), HerdrHostError> {
+        let _ = run_herdr(&self.binary, &["agent", "prompt", target, text]).await?;
+        Ok(())
     }
 }
 
@@ -305,8 +352,8 @@ impl HerdrEventSource for HerdrNamedPipeEventSource {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_lifecycle_event, parse_pane_list, parse_subscription_ack, parse_workspace_list,
-        windows_named_pipe_path,
+        parse_agent_list, parse_lifecycle_event, parse_pane_list, parse_subscription_ack,
+        parse_workspace_list, windows_named_pipe_path,
     };
     use herdr_workbench_app_core::HerdrLifecycleEvent;
     use std::path::{Path, PathBuf};
@@ -386,5 +433,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(event, None);
+    }
+
+    #[test]
+    fn parse_agent_list_reads_cli_envelope() {
+        let stdout = r#"{"id":"cli:agent:list","result":{"type":"agent_list","agents":[{"agent":"pi","agent_status":"idle","focused":true,"pane_id":"w9:p3S","workspace_id":"w9"},{"agent":"claude","agent_status":"working","focused":false,"pane_id":"wD:p1","workspace_id":"wD"}]}}"#;
+        let agents = parse_agent_list(stdout).unwrap();
+        assert_eq!(agents.len(), 2);
+        assert_eq!(agents[0].pane_id, "w9:p3S");
+        assert_eq!(agents[0].status, "idle");
+        assert!(agents[0].focused);
+        assert_eq!(agents[1].agent, "claude");
+        assert!(!agents[1].focused);
     }
 }

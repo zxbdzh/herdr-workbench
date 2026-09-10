@@ -148,6 +148,7 @@ where
             events,
             screenshot_store(),
             diagnostics,
+            Arc::new(HerdrCliHost::from_env()),
         )),
     )
     .await
