@@ -43,7 +43,13 @@ const workspaceSocketUrl = (workspaceId: string) => {
 
 const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(path, { headers: { "content-type": "application/json", ...init?.headers }, ...init });
-  const body = await response.json() as T & ApiError;
+  const raw = await response.text();
+  let body: T & ApiError;
+  try {
+    body = JSON.parse(raw) as T & ApiError;
+  } catch {
+    throw new Error("Workbench API 没有从 localhost 返回 JSON");
+  }
   if (!response.ok) throw new Error(body.error?.message ?? `请求失败：${response.status}`);
   return body as T;
 };

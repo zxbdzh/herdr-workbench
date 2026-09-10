@@ -10,8 +10,8 @@ use herdr_workbench_domain::{
     PreviewStatus, WorkbenchWorkspaceId, Workspace,
 };
 use herdr_workbench_server::{
-    connect_repository, diagnostics_with_bus, serve_with_repository, shared_event_bus,
-    spawn_herdr_event_sync, spawn_herdr_reconcile, sync_herdr_workspaces,
+    DEFAULT_ADDRESS, connect_repository, diagnostics_with_bus, serve_with_repository_ready,
+    shared_event_bus, spawn_herdr_event_sync, spawn_herdr_reconcile, sync_herdr_workspaces,
 };
 use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
@@ -638,10 +638,30 @@ fn record_diagnostic(diagnostics: Arc<dyn PreviewDiagnosticsSink>, diagnostic: P
     });
 }
 
+pub fn ui_origin() -> Url {
+    Url::parse(&format!("http://{DEFAULT_ADDRESS}/")).expect("valid localhost origin")
+}
+
+fn open_console_on_api_origin(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        eprintln!("Workbench main window was not found");
+        return;
+    };
+    if let Err(error) = window.navigate(ui_origin()) {
+        eprintln!("failed to open Workbench UI on localhost: {error}");
+        return;
+    }
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let handle = app.handle().clone();
+            if let Some(window) = handle.get_webview_window("main") {
+                let _ = window.hide();
+            }
             tauri::async_runtime::spawn(async move {
                 match connect_repository().await {
                     Ok(repository) => {
@@ -656,13 +676,18 @@ pub fn run() {
                             ));
                         let diagnostics = diagnostics_with_bus(Arc::clone(&events));
                         let preview_adapter = Arc::new(TauriWebViewPreviewAdapter::new(
-                            handle,
+                            handle.clone(),
                             state,
                             Arc::clone(&diagnostics),
                         ));
-                        if let Err(error) =
-                            serve_with_repository(repository, preview_adapter, diagnostics, events)
-                                .await
+                        if let Err(error) = serve_with_repository_ready(
+                            repository,
+                            preview_adapter,
+                            diagnostics,
+                            events,
+                            move || open_console_on_api_origin(&handle),
+                        )
+                        .await
                         {
                             eprintln!("Workbench API stopped: {error}");
                         }
@@ -718,6 +743,11 @@ mod tests {
     fn empty_url_becomes_about_blank() {
         let url = TauriWebViewPreviewAdapter::target_url(None).unwrap();
         assert_eq!(url.as_str(), "about:blank");
+    }
+
+    #[test]
+    fn console_ui_opens_on_the_localhost_api_origin() {
+        assert_eq!(ui_origin().as_str(), "http://127.0.0.1:17321/");
     }
 
     #[test]
