@@ -79,8 +79,17 @@ function App() {
 
       const connect = () => {
         if (stopped) return;
+        if (timer !== undefined) {
+          window.clearTimeout(timer);
+          timer = undefined;
+        }
+        const previous = socket;
         const next = new WebSocket(workspaceSocketUrl(workspace.workspace_id));
         socket = next;
+        if (previous && previous !== next) {
+          previous.onclose = null;
+          previous.close();
+        }
         next.onmessage = (message) => {
           const event = JSON.parse(message.data) as WorkspaceEventEnvelope;
           if (event.event_type === "resync") {
@@ -93,12 +102,14 @@ function App() {
           if (preview) setPreviews((current) => ({ ...current, [workspace.workspace_id]: preview }));
         };
         next.onerror = () => {
-          if (!stopped) setError("无法订阅 Preview 状态");
+          if (!stopped && socket === next) setError("无法订阅 Preview 状态");
         };
         next.onclose = () => {
-          const action = nextWorkspaceSocketAction("close", stopped);
+          if (stopped || socket !== next) return;
+          const action = nextWorkspaceSocketAction("close", false);
           if (action?.type !== "reconnect") return;
           refresh();
+          if (timer !== undefined) window.clearTimeout(timer);
           timer = window.setTimeout(connect, action.delayMs);
         };
       };
