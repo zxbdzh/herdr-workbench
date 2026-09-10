@@ -162,6 +162,17 @@ impl WorkspaceEventEnvelope {
         }
     }
 
+    pub fn resync(workspace_id: &herdr_workbench_domain::WorkbenchWorkspaceId) -> Self {
+        Self {
+            event_id: uuid::Uuid::now_v7().to_string(),
+            event_type: "resync".into(),
+            workspace_id: workspace_id.as_uuid().to_string(),
+            occurred_at: chrono::Utc::now().to_rfc3339(),
+            revision: 0,
+            payload: Value::Null,
+        }
+    }
+
     pub fn from_app_event(event: herdr_workbench_domain::AppEvent) -> Self {
         let (event_type, payload) = match event.payload {
             herdr_workbench_domain::EventPayload::PreviewOpened(opened) => (

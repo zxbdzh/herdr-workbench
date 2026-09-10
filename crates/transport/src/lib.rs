@@ -371,12 +371,7 @@ async fn push_workspace_events(
             }
             Ok(_) => {}
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                let _ = socket
-                    .send(Message::Text(
-                        serde_json::json!({"event_type":"resync"})
-                            .to_string()
-                            .into(),
-                    ))
+                let _ = send_envelope(&mut socket, &WorkspaceEventEnvelope::resync(&workspace_id))
                     .await;
                 break;
             }
@@ -996,7 +991,7 @@ mod tests {
         assert_eq!(captured.payload["path"], "latest.png");
         assert!(captured.payload.get("PreviewScreenshotCaptured").is_none());
         let diagnostic = herdr_workbench_domain::PreviewDiagnostic {
-            workspace_id,
+            workspace_id: workspace_id.clone(),
             kind: herdr_workbench_domain::PreviewDiagnosticKind::Console,
             level: herdr_workbench_domain::PreviewDiagnosticLevel::Error,
             message: "boom".into(),
@@ -1020,6 +1015,13 @@ mod tests {
         assert_eq!(state.payload["preview_url"], "http://localhost:3000");
         assert!(state.payload["preview_title"].is_null());
         assert!(state.payload.get("PreviewStateUpdated").is_none());
+        let resync = WorkspaceEventEnvelope::resync(&workspace_id);
+        assert_eq!(resync.event_type, "resync");
+        assert_eq!(resync.workspace_id, workspace_id.as_uuid().to_string());
+        assert_eq!(resync.revision, 0);
+        assert!(resync.payload.is_null());
+        assert!(!resync.event_id.is_empty());
+        assert!(!resync.occurred_at.is_empty());
     }
 
     #[tokio::test]
