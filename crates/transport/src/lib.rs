@@ -12,14 +12,15 @@ use axum::{
     routing::{get, post},
 };
 use herdr_workbench_app_core::{
-    CapturePreview, EventBus, OpenPreview, PreviewAdapter, PreviewDiagnosticsSink, PreviewError,
-    PreviewScreenshotRepository, PreviewTransactionRepository, ScreenshotStore,
+    CapturePreview, EventBus, HerdrAgentBridge, OpenPreview, PreviewAdapter,
+    PreviewDiagnosticsSink, PreviewError, PreviewScreenshotRepository,
+    PreviewTransactionRepository, ScreenshotStore, SendPreviewContext, UnavailableAgentBridge,
     WorkspaceRepository,
 };
 use herdr_workbench_contracts::{
-    ApiDoc, PreviewDiagnosticDto, PreviewDiagnosticsResponse, PreviewOpenRequest,
-    PreviewScreenshotResponse, PreviewStateResponse, WorkspaceDto, WorkspaceEventEnvelope,
-    WorkspaceListResponse,
+    ApiDoc, PreviewContextSendRequest, PreviewContextSendResponse, PreviewDiagnosticDto,
+    PreviewDiagnosticsResponse, PreviewOpenRequest, PreviewScreenshotResponse,
+    PreviewStateResponse, WorkspaceDto, WorkspaceEventEnvelope, WorkspaceListResponse,
 };
 use rust_embed::RustEmbed;
 use utoipa::OpenApi;
@@ -35,6 +36,7 @@ pub struct AppState<W, P, A, S> {
     pub events: Arc<EventBus>,
     pub screenshots: Arc<S>,
     pub diagnostics: Arc<dyn PreviewDiagnosticsSink>,
+    pub agents: Arc<dyn HerdrAgentBridge>,
 }
 
 impl<W, P, A, S> Clone for AppState<W, P, A, S> {
@@ -46,6 +48,7 @@ impl<W, P, A, S> Clone for AppState<W, P, A, S> {
             events: Arc::clone(&self.events),
             screenshots: Arc::clone(&self.screenshots),
             diagnostics: Arc::clone(&self.diagnostics),
+            agents: Arc::clone(&self.agents),
         }
     }
 }
@@ -58,6 +61,7 @@ impl<W, P, A, S> AppState<W, P, A, S> {
         events: Arc<EventBus>,
         screenshots: Arc<S>,
         diagnostics: Arc<dyn PreviewDiagnosticsSink>,
+        agents: Arc<dyn HerdrAgentBridge>,
     ) -> Self {
         Self {
             workspaces,
@@ -66,6 +70,7 @@ impl<W, P, A, S> AppState<W, P, A, S> {
             events,
             screenshots,
             diagnostics,
+            agents,
         }
     }
 }
@@ -101,6 +106,10 @@ where
             get(get_diagnostics::<W, P, A, S>),
         )
         .route(
+            "/api/v1/workspaces/{id}/context/send",
+            post(send_preview_context::<W, P, A, S>),
+        )
+        .route(
             "/ws/v1/workspaces/{id}",
             get(workspace_events::<W, P, A, S>),
         )
@@ -115,6 +124,7 @@ pub fn empty_router() -> Router {
         Arc::new(herdr_workbench_app_core::EventBus::new(16)),
         Arc::new(EmptyScreenshotStore),
         Arc::new(herdr_workbench_app_core::InMemoryPreviewDiagnostics::default()),
+        Arc::new(UnavailableAgentBridge),
     ))
 }
 
@@ -316,6 +326,39 @@ where
             .into_iter()
             .map(PreviewDiagnosticDto::from)
             .collect(),
+    }))
+}
+
+async fn send_preview_context<W, P, A, S>(
+    Path(id): Path<String>,
+    State(state): State<AppState<W, P, A, S>>,
+    Json(request): Json<PreviewContextSendRequest>,
+) -> Result<Json<PreviewContextSendResponse>, ApiError>
+where
+    W: WorkspaceRepository + 'static,
+    P: PreviewTransactionRepository + PreviewScreenshotRepository + 'static,
+    A: PreviewAdapter + 'static,
+    S: ScreenshotStore + 'static,
+{
+    let workspace_id = parse_workspace_id(&id)?;
+    let workspace = state
+        .workspaces
+        .find_by_id(&workspace_id)
+        .await
+        .map_err(ApiError::repository)?
+        .ok_or_else(|| ApiError::workspace_not_found(id.clone()))?;
+    let receipt = SendPreviewContext::new(
+        state.previews.as_ref(),
+        state.diagnostics.as_ref(),
+        state.agents.as_ref(),
+    )
+    .execute(&workspace, request.note)
+    .await
+    .map_err(ApiError::application)?;
+    Ok(Json(PreviewContextSendResponse {
+        pane_id: receipt.pane_id,
+        agent: receipt.agent,
+        accepted: true,
     }))
 }
 
@@ -693,6 +736,7 @@ mod tests {
             Arc::new(EventBus::new(8)),
             Arc::new(InMemoryScreenshotStore::default()),
             Arc::new(InMemoryPreviewDiagnostics::default()),
+            Arc::new(UnavailableAgentBridge),
         );
         let app = router(state);
         let open_request = Request::builder()
@@ -747,6 +791,7 @@ mod tests {
             Arc::new(EventBus::new(8)),
             Arc::new(InMemoryScreenshotStore::default()),
             Arc::new(InMemoryPreviewDiagnostics::default()),
+            Arc::new(UnavailableAgentBridge),
         );
         let app = router(state);
         let capture_request = Request::builder()
@@ -815,6 +860,7 @@ mod tests {
             Arc::new(EventBus::new(8)),
             Arc::new(InMemoryScreenshotStore::default()),
             diagnostics,
+            Arc::new(UnavailableAgentBridge),
         );
         let app = router(state);
         let response = app
@@ -860,6 +906,7 @@ mod tests {
             Arc::new(EventBus::new(8)),
             Arc::new(InMemoryScreenshotStore::default()),
             Arc::new(InMemoryPreviewDiagnostics::default()),
+            Arc::new(UnavailableAgentBridge),
         );
         let app = router(state);
         let response = app
@@ -880,6 +927,118 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["diagnostics"], serde_json::json!([]));
+    }
+
+    #[derive(Default)]
+    struct FakeAgentBridge {
+        agents: Vec<herdr_workbench_app_core::HerdrAgentInfo>,
+        prompts: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    }
+
+    #[async_trait]
+    impl HerdrAgentBridge for FakeAgentBridge {
+        async fn list_agents(
+            &self,
+        ) -> Result<
+            Vec<herdr_workbench_app_core::HerdrAgentInfo>,
+            herdr_workbench_app_core::HerdrHostError,
+        > {
+            Ok(self.agents.clone())
+        }
+
+        async fn prompt_agent(
+            &self,
+            target: &str,
+            text: &str,
+        ) -> Result<(), herdr_workbench_app_core::HerdrHostError> {
+            self.prompts
+                .lock()
+                .unwrap()
+                .push((target.to_owned(), text.to_owned()));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn context_send_route_prompts_the_focused_agent() {
+        let workspaces = Arc::new(InMemoryWorkspaceRepository::default());
+        let workspace = BindWorkspace::new(workspaces.as_ref())
+            .execute(
+                HerdrWorkspaceContext::new(
+                    "herdr-1",
+                    "Siftmark",
+                    std::path::PathBuf::from(r"C:\projects\siftmark"),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let previews = Arc::new(InMemoryPreviewRepository::default());
+        let events = EventBus::new(8);
+        OpenPreview::new(previews.as_ref(), &FakePreviewAdapter, &events)
+            .execute(&workspace, Some("http://localhost:3000".into()))
+            .await
+            .unwrap();
+        let diagnostics = Arc::new(InMemoryPreviewDiagnostics::default());
+        diagnostics
+            .record(herdr_workbench_domain::PreviewDiagnostic {
+                workspace_id: workspace.workspace_id.clone(),
+                kind: herdr_workbench_domain::PreviewDiagnosticKind::Console,
+                level: herdr_workbench_domain::PreviewDiagnosticLevel::Error,
+                message: "boom".into(),
+                source: None,
+                status: None,
+                occurred_at: chrono::Utc::now(),
+            })
+            .await;
+        let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let agents = FakeAgentBridge {
+            agents: vec![herdr_workbench_app_core::HerdrAgentInfo {
+                workspace_id: "herdr-1".into(),
+                pane_id: "w1:p1".into(),
+                agent: "pi".into(),
+                status: "idle".into(),
+                focused: true,
+            }],
+            prompts: Arc::clone(&prompts),
+        };
+        let state = AppState::new(
+            workspaces,
+            previews,
+            Arc::new(FakePreviewAdapter),
+            Arc::new(events),
+            Arc::new(InMemoryScreenshotStore::default()),
+            diagnostics,
+            Arc::new(agents),
+        );
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/workspaces/{}/context/send",
+                        workspace.workspace_id.as_uuid()
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"note":"please check the header"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["pane_id"], "w1:p1");
+        assert_eq!(json["agent"], "pi");
+        assert_eq!(json["accepted"], true);
+        let recorded = prompts.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert!(recorded[0].1.contains("http://localhost:3000"));
+        assert!(recorded[0].1.contains("boom"));
+        assert!(recorded[0].1.contains("please check the header"));
     }
 
     #[tokio::test]
@@ -925,6 +1084,7 @@ mod tests {
             events,
             Arc::new(InMemoryScreenshotStore::default()),
             diagnostics,
+            Arc::new(UnavailableAgentBridge),
         );
         let app = router(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1055,6 +1215,7 @@ mod tests {
             Arc::clone(&events),
             Arc::new(InMemoryScreenshotStore::default()),
             diagnostics,
+            Arc::new(UnavailableAgentBridge),
         );
         let app = router(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1116,6 +1277,7 @@ mod tests {
             Arc::clone(&events),
             Arc::new(InMemoryScreenshotStore::default()),
             diagnostics,
+            Arc::new(UnavailableAgentBridge),
         );
         let app = router(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

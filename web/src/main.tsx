@@ -55,8 +55,10 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [opening, setOpening] = useState<string | null>(null);
   const [capturing, setCapturing] = useState<string | null>(null);
+  const [sending, setSending] = useState<string | null>(null);
   const [shots, setShots] = useState<Record<string, string>>({});
   const [diagnostics, setDiagnostics] = useState<Record<string, PreviewDiagnostic[]>>({});
+  const [sent, setSent] = useState<Record<string, string>>({});
 
   useEffect(() => {
     Promise.all([api<HealthResponse>("/api/v1/health"), api<WorkspaceListResponse>("/api/v1/workspaces")])
@@ -171,6 +173,25 @@ function App() {
     }
   };
 
+  const sendContext = async (workspace: Workspace) => {
+    setSending(workspace.workspace_id);
+    setError(null);
+    try {
+      const receipt = await api<{ pane_id: string; agent: string; accepted: boolean }>(
+        `/api/v1/workspaces/${workspace.workspace_id}/context/send`,
+        { method: "POST", body: JSON.stringify({}) },
+      );
+      setSent((current) => ({
+        ...current,
+        [workspace.workspace_id]: `已发给 ${receipt.agent} · ${receipt.pane_id}`,
+      }));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "无法发给当前 Agent");
+    } finally {
+      setSending(null);
+    }
+  };
+
   return (
     <main className="shell">
       <header className="topbar">
@@ -194,7 +215,9 @@ function App() {
             <button className="preview-button" type="button" onClick={() => openPreview(workspace)} disabled={opening === workspace.workspace_id}>{opening === workspace.workspace_id ? "打开中..." : "查看 Preview"}</button>
             <button className="preview-button" type="button" onClick={() => captureScreenshot(workspace)} disabled={capturing === workspace.workspace_id}>{capturing === workspace.workspace_id ? "截图中..." : "截图"}</button>
             <button className="preview-button" type="button" onClick={() => loadDiagnostics(workspace)}>诊断</button>
+            <button className="preview-button" type="button" onClick={() => sendContext(workspace)} disabled={sending === workspace.workspace_id}>{sending === workspace.workspace_id ? "发送中..." : "发给 Agent"}</button>
             {shots[workspace.workspace_id] && <img className="preview-shot" alt={`${workspace.label} preview`} src={shots[workspace.workspace_id]} />}
+            {sent[workspace.workspace_id] && <span className="preview-state">{sent[workspace.workspace_id]}</span>}
             {diagnostics[workspace.workspace_id]?.length ? <ul className="preview-diagnostics">{diagnostics[workspace.workspace_id].map((item, index) => <li key={`${item.occurred_at}-${index}`}>{item.level} · {item.kind} · {item.message}</li>)}</ul> : null}<div className="revision">REV {workspace.revision}</div>
           </article>;
         })}
