@@ -38,7 +38,20 @@ impl SqliteWorkspaceRepository {
     }
 
     pub async fn migrate(&self) -> Result<(), sqlx::migrate::MigrateError> {
-        sqlx::migrate!("./migrations").run(&self.pool).await
+        let mut migrator = sqlx::migrate!("./migrations");
+        for migration in migrator.migrations.to_mut() {
+            let lf_sql = migration.sql.replace(char::from(13), "");
+            if lf_sql != migration.sql {
+                *migration = sqlx::migrate::Migration::new(
+                    migration.version,
+                    migration.description.clone(),
+                    migration.migration_type,
+                    std::borrow::Cow::Owned(lf_sql),
+                    migration.no_tx,
+                );
+            }
+        }
+        migrator.run(&self.pool).await
     }
 
     pub fn pool(&self) -> &SqlitePool {
@@ -360,6 +373,7 @@ mod tests {
         BindWorkspace, CapturePreview, EventBus, OpenPreview, PreviewAdapter, PreviewError,
         PreviewScreenshotRepository, PreviewStateUpdater,
     };
+    use sha2::Digest;
     struct FakePreview;
     #[async_trait]
     impl PreviewAdapter for FakePreview {
@@ -469,6 +483,72 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(event_count, 1);
+    }
+
+    #[tokio::test]
+    async fn existing_lf_checksum_still_migrates_to_the_latest_schema() {
+        let db =
+            SqliteWorkspaceRepository::connect("sqlite://file:legacy-lf?mode=memory&cache=shared")
+                .await
+                .unwrap();
+        sqlx::query(
+            r#"
+CREATE TABLE IF NOT EXISTS _sqlx_migrations (
+    version BIGINT PRIMARY KEY,
+    description TEXT NOT NULL,
+    installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    success BOOLEAN NOT NULL,
+    checksum BLOB NOT NULL,
+    execution_time BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS workspaces (
+    workspace_id TEXT PRIMARY KEY NOT NULL,
+    herdr_workspace_id TEXT NOT NULL UNIQUE,
+    label TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+"#,
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let lf_sql = include_str!("../migrations/0001_workspaces.sql").replace(char::from(13), "");
+        let lf_checksum = sha2::Sha384::digest(lf_sql.as_bytes()).to_vec();
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) VALUES (1, 'workspaces', true, ?, 1)",
+        )
+        .bind(lf_checksum)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        db.migrate()
+            .await
+            .expect("LF checksum from an existing Windows install must still migrate");
+
+        let latest: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(latest, 4);
+        let title_column: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('preview_sessions') WHERE name = 'title'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(title_column, 1);
+        let screenshot_table: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'preview_screenshots'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(screenshot_table, 1);
     }
 
     #[tokio::test]

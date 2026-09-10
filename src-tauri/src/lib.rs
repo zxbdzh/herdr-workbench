@@ -657,6 +657,30 @@ fn open_console_on_api_origin(app: &AppHandle) {
     });
 }
 
+fn show_startup_error(app: &AppHandle, error: impl std::fmt::Display) {
+    let message = format!("Workbench API 启动失败：{error}");
+    eprintln!("{message}");
+    let handle = app.clone();
+    let _ = handle.clone().run_on_main_thread(move || {
+        if let Some(window) = handle.get_webview_window("main") {
+            let escaped = html_escape(&message);
+            let _ = window.eval(format!(
+                "document.body.innerHTML = '<pre style=\"white-space:pre-wrap;padding:24px;color:#fca5a5;font:14px/1.4 Consolas,monospace\">{escaped}</pre>';"
+            ));
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    });
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
@@ -679,6 +703,7 @@ pub fn run() {
                             Arc::clone(&diagnostics),
                         ));
                         let sync_repository = Arc::clone(&repository);
+                        let ready_handle = handle.clone();
                         tauri::async_runtime::spawn(async move {
                             sync_herdr_workspaces(sync_repository.as_ref()).await;
                         });
@@ -687,14 +712,14 @@ pub fn run() {
                             preview_adapter,
                             diagnostics,
                             events,
-                            move || open_console_on_api_origin(&handle),
+                            move || open_console_on_api_origin(&ready_handle),
                         )
                         .await
                         {
-                            eprintln!("Workbench API stopped: {error}");
+                            show_startup_error(&handle, error);
                         }
                     }
-                    Err(error) => eprintln!("Workbench API initialization failed: {error}"),
+                    Err(error) => show_startup_error(&handle, error),
                 }
             });
             Ok(())
