@@ -85,6 +85,8 @@ where
     Router::new()
         .route("/api/v1/health", get(health))
         .route("/api/v1/openapi.json", get(openapi))
+        .route("/", get(web_index))
+        .route("/assets/{*path}", get(web_dist_asset))
         .route("/app", get(web_index))
         .route("/app/", get(web_index))
         .route("/app/{*path}", get(web_asset))
@@ -138,6 +140,10 @@ async fn openapi() -> Json<utoipa::openapi::OpenApi> {
 
 async fn web_index() -> Response {
     web_asset(Path(String::from("index.html"))).await
+}
+
+async fn web_dist_asset(Path(path): Path<String>) -> Response {
+    web_asset(Path(format!("assets/{path}"))).await
 }
 
 async fn web_asset(Path(path): Path<String>) -> Response {
@@ -713,6 +719,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn root_route_serves_the_embedded_react_page_on_the_api_origin() {
+        let response = empty_router()
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).unwrap(),
+            "text/html; charset=utf-8"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.to_ascii_lowercase().contains("<!doctype html>"));
+    }
+
+    #[tokio::test]
+    async fn health_from_the_ui_origin_still_returns_json() {
+        let response = empty_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ready");
     }
 
     #[tokio::test]

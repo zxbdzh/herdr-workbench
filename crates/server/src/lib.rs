@@ -134,11 +134,26 @@ pub async fn serve_with_repository<A>(
 where
     A: PreviewAdapter + 'static,
 {
+    serve_with_repository_ready(repository, preview_adapter, diagnostics, events, || {}).await
+}
+
+pub async fn serve_with_repository_ready<A, F>(
+    repository: Arc<SqliteWorkspaceRepository>,
+    preview_adapter: Arc<A>,
+    diagnostics: Arc<dyn PreviewDiagnosticsSink>,
+    events: Arc<EventBus>,
+    on_ready: F,
+) -> Result<(), ServerError>
+where
+    A: PreviewAdapter + 'static,
+    F: FnOnce() + Send + 'static,
+{
     let address: SocketAddr = DEFAULT_ADDRESS.parse().expect("valid localhost address");
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .map_err(ServerError::Bind)?;
     println!("herdr-workbench listening on http://{address}");
+    on_ready();
     axum::serve(
         listener,
         router(AppState::new(
