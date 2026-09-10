@@ -117,9 +117,12 @@ where
     A: PreviewAdapter + 'static,
 {
     let repository = connect_repository().await?;
-    sync_herdr_workspaces(repository.as_ref()).await;
     spawn_herdr_reconcile(Arc::clone(&repository));
     spawn_herdr_event_sync(Arc::clone(&repository));
+    let sync_repository = Arc::clone(&repository);
+    tokio::spawn(async move {
+        sync_herdr_workspaces(sync_repository.as_ref()).await;
+    });
     let events = shared_event_bus();
     let diagnostics = diagnostics_with_bus(Arc::clone(&events));
     serve_with_repository(repository, preview_adapter, diagnostics, events).await
