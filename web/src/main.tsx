@@ -66,6 +66,7 @@ function App() {
   const [shots, setShots] = useState<Record<string, string>>({});
   const [diagnostics, setDiagnostics] = useState<Record<string, PreviewDiagnostic[]>>({});
   const [sent, setSent] = useState<Record<string, string>>({});
+  const [urls, setUrls] = useState<Record<string, string>>({});
 
   useEffect(() => {
     let stopped = false;
@@ -152,13 +153,18 @@ function App() {
     return () => subscriptions.forEach((stop) => stop());
   }, [workspaces]);
 
+  const previewUrl = (workspace: Workspace) => {
+    const value = urls[workspace.workspace_id]?.trim();
+    return value ? value : undefined;
+  };
+
   const openPreview = async (workspace: Workspace) => {
     setOpening(workspace.workspace_id);
     setError(null);
     try {
       const preview = await api<PreviewState>(`/api/v1/workspaces/${workspace.workspace_id}/preview/open`, {
         method: "POST",
-        body: JSON.stringify({}),
+        body: JSON.stringify({ url: previewUrl(workspace) }),
       });
       setPreviews((current) => ({ ...current, [workspace.workspace_id]: preview }));
     } catch (reason) {
@@ -170,6 +176,10 @@ function App() {
     setCapturing(workspace.workspace_id);
     setError(null);
     try {
+      await api<PreviewState>(`/api/v1/workspaces/${workspace.workspace_id}/preview/open`, {
+        method: "POST",
+        body: JSON.stringify({ url: previewUrl(workspace) }),
+      });
       const response = await fetch(`/api/v1/workspaces/${workspace.workspace_id}/preview/screenshot`, { method: "POST" });
       if (!response.ok) {
         const body = await response.json() as ApiError;
@@ -238,6 +248,7 @@ function App() {
           const preview = previews[workspace.workspace_id];
           return <article className="workspace" key={workspace.workspace_id}>
             <div className="workspace-index">W</div><div className="workspace-main"><h3>{workspace.label}</h3><code>{workspace.cwd}</code><span className="workspace-id">Herdr · {workspace.herdr_workspace_id}</span>{preview && <span className="preview-state">Preview · {preview.preview_status ?? "未打开"}{preview.preview_title ? ` · ${preview.preview_title}` : ""}{preview.preview_url ? ` · ${preview.preview_url}` : ""}</span>}</div>
+            <input className="preview-url" value={urls[workspace.workspace_id] ?? preview?.preview_url ?? ""} placeholder="http://127.0.0.1:3000" onChange={(event) => setUrls((current) => ({ ...current, [workspace.workspace_id]: event.target.value }))} />
             <button className="preview-button" type="button" onClick={() => openPreview(workspace)} disabled={opening === workspace.workspace_id}>{opening === workspace.workspace_id ? "打开中..." : "查看 Preview"}</button>
             <button className="preview-button" type="button" onClick={() => captureScreenshot(workspace)} disabled={capturing === workspace.workspace_id}>{capturing === workspace.workspace_id ? "截图中..." : "截图"}</button>
             <button className="preview-button" type="button" onClick={() => loadDiagnostics(workspace)}>诊断</button>

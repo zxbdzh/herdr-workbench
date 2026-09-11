@@ -31,6 +31,7 @@ h2 { margin-bottom: 0; font-size: 24px; }
 .workspace code { display: block; overflow: hidden; color: #b9c5d2; text-overflow: ellipsis; white-space: nowrap; font: 13px Consolas, monospace; }
 .workspace-id { display: block; margin-top: 8px; }
 .preview-state { display: block; margin-top: 8px; color: #55d68a; font: 12px Consolas, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preview-url { min-width: 180px; flex: 1; max-width: 280px; border: 1px solid #394654; background: #0d1218; color: #e6edf3; padding: 8px 10px; font: 12px Consolas, monospace; }
 .preview-button { border: 1px solid #2e8b68; background: transparent; color: #55d68a; padding: 8px 10px; cursor: pointer; font: 12px Consolas, monospace; white-space: nowrap; }
 .preview-button:hover:not(:disabled) { background: #123126; }
 .preview-button:disabled { cursor: wait; opacity: .6; }
