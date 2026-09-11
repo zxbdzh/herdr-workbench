@@ -1,6 +1,6 @@
 [package]
 name = "herdr-workbench-desktop"
-version = "0.1.4"
+version = "0.1.5"
 description = "Windows-first Herdr Workbench desktop host"
 authors = ["zxb"]
 edition = "2024"

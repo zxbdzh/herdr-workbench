@@ -560,6 +560,7 @@ where
         workspace: &Workspace,
         url: Option<String>,
     ) -> Result<PreviewSession, ApplicationError> {
+        let session = self.adapter.open(workspace, url).await?;
         if let Some(existing) = self
             .previews
             .find_by_workspace(&workspace.workspace_id)
@@ -568,7 +569,6 @@ where
             return Ok(existing);
         }
 
-        let session = self.adapter.open(workspace, url).await?;
         let commit = self
             .previews
             .commit_preview_open(&workspace.workspace_id, session)
@@ -605,7 +605,13 @@ where
         &self,
         workspace: &Workspace,
     ) -> Result<PreviewScreenshot, ApplicationError> {
-        let image = self.adapter.capture_screenshot(workspace).await?;
+        let image = match self.adapter.capture_screenshot(workspace).await {
+            Ok(image) => image,
+            Err(_) => {
+                self.adapter.open(workspace, None).await?;
+                self.adapter.capture_screenshot(workspace).await?
+            }
+        };
         let path = self.store.save(&workspace.workspace_id, &image.png).await?;
         let screenshot = PreviewScreenshot {
             screenshot_id: uuid::Uuid::now_v7(),
@@ -1095,6 +1101,110 @@ mod tests {
         assert_eq!(previews.revision(&workspace.workspace_id).await, 1);
         assert!(receiver.try_recv().is_ok());
         assert!(receiver.try_recv().is_err());
+    }
+
+    struct CountingPreviewAdapter {
+        opens: std::sync::Mutex<u32>,
+        window_open: std::sync::Mutex<bool>,
+    }
+
+    impl Default for CountingPreviewAdapter {
+        fn default() -> Self {
+            Self {
+                opens: std::sync::Mutex::new(0),
+                window_open: std::sync::Mutex::new(false),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl PreviewAdapter for CountingPreviewAdapter {
+        async fn open(
+            &self,
+            workspace: &herdr_workbench_domain::Workspace,
+            url: Option<String>,
+        ) -> Result<PreviewSession, PreviewError> {
+            *self.opens.lock().unwrap() += 1;
+            *self.window_open.lock().unwrap() = true;
+            Ok(PreviewSession::opening(workspace, url).mark_open())
+        }
+
+        async fn capture_screenshot(
+            &self,
+            _: &herdr_workbench_domain::Workspace,
+        ) -> Result<CapturedPreviewImage, PreviewError> {
+            if !*self.window_open.lock().unwrap() {
+                return Err(PreviewError::unavailable("preview window is not open"));
+            }
+            Ok(CapturedPreviewImage {
+                png: vec![137, 80, 78, 71, 13, 10, 26, 10],
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn opening_preview_again_still_asks_the_adapter_to_show_the_window() {
+        let workspaces = InMemoryWorkspaceRepository::default();
+        let workspace = BindWorkspace::new(&workspaces)
+            .execute(
+                HerdrWorkspaceContext::new(
+                    "herdr-workspace-1",
+                    "Siftmark",
+                    PathBuf::from(r"C:\projects\siftmark"),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let previews = InMemoryPreviewRepository::default();
+        let events = EventBus::new(16);
+        let adapter = CountingPreviewAdapter::default();
+        let use_case = OpenPreview::new(&previews, &adapter, &events);
+        let first = use_case
+            .execute(&workspace, Some("http://localhost:3000".into()))
+            .await
+            .unwrap();
+        *adapter.window_open.lock().unwrap() = false;
+        let second = use_case
+            .execute(&workspace, Some("http://localhost:3000".into()))
+            .await
+            .unwrap();
+        assert_eq!(first.session_id, second.session_id);
+        assert_eq!(*adapter.opens.lock().unwrap(), 2);
+        assert!(*adapter.window_open.lock().unwrap());
+        assert_eq!(previews.revision(&workspace.workspace_id).await, 1);
+    }
+
+    #[tokio::test]
+    async fn capturing_screenshot_reopens_the_preview_window_when_it_is_missing() {
+        let workspaces = InMemoryWorkspaceRepository::default();
+        let workspace = BindWorkspace::new(&workspaces)
+            .execute(
+                HerdrWorkspaceContext::new(
+                    "herdr-workspace-1",
+                    "Siftmark",
+                    PathBuf::from(r"C:\projects\siftmark"),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let previews = InMemoryPreviewRepository::default();
+        let store = InMemoryScreenshotStore::default();
+        let events = EventBus::new(16);
+        let adapter = CountingPreviewAdapter::default();
+        OpenPreview::new(&previews, &adapter, &events)
+            .execute(&workspace, Some("http://localhost:3000".into()))
+            .await
+            .unwrap();
+        *adapter.window_open.lock().unwrap() = false;
+        let screenshot = CapturePreview::new(&previews, &adapter, &events, &store)
+            .execute(&workspace)
+            .await
+            .unwrap();
+        assert_eq!(screenshot.byte_size, 8);
+        assert_eq!(*adapter.opens.lock().unwrap(), 2);
+        assert!(*adapter.window_open.lock().unwrap());
     }
 
     #[tokio::test]
