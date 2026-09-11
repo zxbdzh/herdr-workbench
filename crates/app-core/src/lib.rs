@@ -43,6 +43,8 @@ pub struct HerdrAgentInfo {
 pub trait HerdrAgentBridge: Send + Sync {
     async fn list_agents(&self) -> Result<Vec<HerdrAgentInfo>, HerdrHostError>;
     async fn prompt_agent(&self, target: &str, text: &str) -> Result<(), HerdrHostError>;
+    async fn read_agent(&self, target: &str) -> Result<String, HerdrHostError>;
+    async fn send_agent_keys(&self, target: &str, keys: &[&str]) -> Result<(), HerdrHostError>;
 }
 
 #[derive(Debug, Default)]
@@ -55,6 +57,16 @@ impl HerdrAgentBridge for UnavailableAgentBridge {
     }
 
     async fn prompt_agent(&self, _: &str, _: &str) -> Result<(), HerdrHostError> {
+        Err(HerdrHostError::unavailable(
+            "Herdr agent bridge is not configured",
+        ))
+    }
+
+    async fn read_agent(&self, _: &str) -> Result<String, HerdrHostError> {
+        Ok(String::new())
+    }
+
+    async fn send_agent_keys(&self, _: &str, _: &[&str]) -> Result<(), HerdrHostError> {
         Err(HerdrHostError::unavailable(
             "Herdr agent bridge is not configured",
         ))
@@ -687,6 +699,199 @@ where
     }
 }
 
+pub const AGENT_TRANSCRIPT_LINES: usize = 80;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentDecision {
+    Yes,
+    No,
+}
+
+impl AgentDecision {
+    pub fn parse(value: &str) -> Result<Self, ApplicationError> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "yes" | "y" | "approve" => Ok(Self::Yes),
+            "no" | "n" | "reject" => Ok(Self::No),
+            _ => Err(DomainError::InvalidAgentDecision.into()),
+        }
+    }
+
+    pub fn keys(self) -> &'static [&'static str] {
+        match self {
+            Self::Yes => &["y", "enter"],
+            Self::No => &["n", "enter"],
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceAgentSession {
+    pub pane_id: String,
+    pub agent: String,
+    pub status: String,
+    pub focused: bool,
+    pub transcript: String,
+}
+
+pub fn agent_is_blocked(status: &str) -> bool {
+    status.eq_ignore_ascii_case("blocked")
+}
+
+fn workspace_agents<'a>(
+    herdr_workspace_id: &str,
+    agents: &'a [HerdrAgentInfo],
+) -> Vec<&'a HerdrAgentInfo> {
+    agents
+        .iter()
+        .filter(|agent| agent.workspace_id == herdr_workspace_id)
+        .collect()
+}
+
+fn find_workspace_agent<'a>(
+    herdr_workspace_id: &str,
+    pane_id: &str,
+    agents: &'a [HerdrAgentInfo],
+) -> Result<&'a HerdrAgentInfo, ApplicationError> {
+    workspace_agents(herdr_workspace_id, agents)
+        .into_iter()
+        .find(|agent| agent.pane_id == pane_id)
+        .ok_or_else(|| {
+            HerdrHostError::unavailable(
+                "no Herdr agent with that pane is running in this workspace",
+            )
+            .into()
+        })
+}
+
+pub struct ListWorkspaceAgents<'a, A: ?Sized> {
+    agents: &'a A,
+}
+
+impl<'a, A> ListWorkspaceAgents<'a, A>
+where
+    A: HerdrAgentBridge + ?Sized,
+{
+    pub fn new(agents: &'a A) -> Self {
+        Self { agents }
+    }
+
+    pub async fn execute(
+        &self,
+        workspace: &Workspace,
+    ) -> Result<Vec<HerdrAgentInfo>, ApplicationError> {
+        let agents = self.agents.list_agents().await?;
+        Ok(
+            workspace_agents(workspace.herdr_workspace_id.as_str(), &agents)
+                .into_iter()
+                .cloned()
+                .collect(),
+        )
+    }
+}
+
+pub struct ReadWorkspaceAgent<'a, A: ?Sized> {
+    agents: &'a A,
+}
+
+impl<'a, A> ReadWorkspaceAgent<'a, A>
+where
+    A: HerdrAgentBridge + ?Sized,
+{
+    pub fn new(agents: &'a A) -> Self {
+        Self { agents }
+    }
+
+    pub async fn execute(
+        &self,
+        workspace: &Workspace,
+        pane_id: &str,
+    ) -> Result<WorkspaceAgentSession, ApplicationError> {
+        let agents = self.agents.list_agents().await?;
+        let selected =
+            find_workspace_agent(workspace.herdr_workspace_id.as_str(), pane_id, &agents)?;
+        let transcript = self.agents.read_agent(&selected.pane_id).await?;
+        Ok(WorkspaceAgentSession {
+            pane_id: selected.pane_id.clone(),
+            agent: selected.agent.clone(),
+            status: selected.status.clone(),
+            focused: selected.focused,
+            transcript,
+        })
+    }
+}
+
+pub struct PromptWorkspaceAgent<'a, A: ?Sized> {
+    agents: &'a A,
+}
+
+impl<'a, A> PromptWorkspaceAgent<'a, A>
+where
+    A: HerdrAgentBridge + ?Sized,
+{
+    pub fn new(agents: &'a A) -> Self {
+        Self { agents }
+    }
+
+    pub async fn execute(
+        &self,
+        workspace: &Workspace,
+        pane_id: &str,
+        text: &str,
+    ) -> Result<WorkspaceAgentSession, ApplicationError> {
+        let agents = self.agents.list_agents().await?;
+        let selected =
+            find_workspace_agent(workspace.herdr_workspace_id.as_str(), pane_id, &agents)?;
+        if agent_is_blocked(&selected.status) {
+            return Err(DomainError::AgentBlockedForPrompt.into());
+        }
+        self.agents.prompt_agent(&selected.pane_id, text).await?;
+        Ok(WorkspaceAgentSession {
+            pane_id: selected.pane_id.clone(),
+            agent: selected.agent.clone(),
+            status: selected.status.clone(),
+            focused: selected.focused,
+            transcript: String::new(),
+        })
+    }
+}
+
+pub struct ApproveWorkspaceAgent<'a, A: ?Sized> {
+    agents: &'a A,
+}
+
+impl<'a, A> ApproveWorkspaceAgent<'a, A>
+where
+    A: HerdrAgentBridge + ?Sized,
+{
+    pub fn new(agents: &'a A) -> Self {
+        Self { agents }
+    }
+
+    pub async fn execute(
+        &self,
+        workspace: &Workspace,
+        pane_id: &str,
+        decision: AgentDecision,
+    ) -> Result<WorkspaceAgentSession, ApplicationError> {
+        let agents = self.agents.list_agents().await?;
+        let selected =
+            find_workspace_agent(workspace.herdr_workspace_id.as_str(), pane_id, &agents)?;
+        if !agent_is_blocked(&selected.status) {
+            return Err(DomainError::AgentNotBlockedForApproval.into());
+        }
+        self.agents
+            .send_agent_keys(&selected.pane_id, decision.keys())
+            .await?;
+        Ok(WorkspaceAgentSession {
+            pane_id: selected.pane_id.clone(),
+            agent: selected.agent.clone(),
+            status: selected.status.clone(),
+            focused: selected.focused,
+            transcript: String::new(),
+        })
+    }
+}
+
 pub fn select_agent_for_workspace<'a>(
     herdr_workspace_id: &str,
     agents: &'a [HerdrAgentInfo],
@@ -1132,17 +1337,18 @@ fn is_advertisable_lan_ip(ip: std::net::Ipv4Addr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, sync::Arc, time::Duration};
+    use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
     use super::{
-        BindWorkspace, CapturePreview, CapturedPreviewImage, EventBus,
-        HERDR_RECONCILE_BACKOFF_INTERVAL, HERDR_RECONCILE_OK_INTERVAL, HerdrAgentBridge,
+        AgentDecision, ApproveWorkspaceAgent, BindWorkspace, CapturePreview, CapturedPreviewImage,
+        EventBus, HERDR_RECONCILE_BACKOFF_INTERVAL, HERDR_RECONCILE_OK_INTERVAL, HerdrAgentBridge,
         HerdrAgentInfo, HerdrEventSource, HerdrEventSyncLoop, HerdrHost, HerdrHostError,
         HerdrLifecycleEvent, HerdrPaneInfo, HerdrReconcileLoop, HerdrWorkspaceContext,
         HerdrWorkspaceInfo, InMemoryPreviewDiagnostics, InMemoryPreviewRepository,
-        InMemoryScreenshotStore, InMemoryWorkspaceRepository, LanAccess, OpenPreview,
-        PreviewAdapter, PreviewDiagnosticsSink, PreviewError, PreviewScreenshotRepository,
-        PreviewStateUpdater, PublishingPreviewStateUpdater, ReconcileSleeper, ScreenshotStore,
+        InMemoryScreenshotStore, InMemoryWorkspaceRepository, LanAccess, ListWorkspaceAgents,
+        OpenPreview, PreviewAdapter, PreviewDiagnosticsSink, PreviewError,
+        PreviewScreenshotRepository, PreviewStateUpdater, PromptWorkspaceAgent,
+        PublishingPreviewStateUpdater, ReadWorkspaceAgent, ReconcileSleeper, ScreenshotStore,
         SendPreviewContext, SyncHerdrWorkspaces, WorkspaceRepository,
     };
     use async_trait::async_trait;
@@ -2029,10 +2235,16 @@ mod tests {
         assert_eq!(repository.workspace_count().await, 0);
     }
 
+    type PromptLog = Arc<std::sync::Mutex<Vec<(String, String)>>>;
+    type TranscriptMap = Arc<std::sync::Mutex<HashMap<String, String>>>;
+    type KeyLog = Arc<std::sync::Mutex<Vec<(String, Vec<String>)>>>;
+
     #[derive(Default)]
     struct FakeAgentBridge {
         agents: Vec<HerdrAgentInfo>,
-        prompts: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+        prompts: PromptLog,
+        transcripts: TranscriptMap,
+        keys: KeyLog,
     }
 
     #[async_trait]
@@ -2046,6 +2258,24 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((target.to_owned(), text.to_owned()));
+            Ok(())
+        }
+
+        async fn read_agent(&self, target: &str) -> Result<String, HerdrHostError> {
+            Ok(self
+                .transcripts
+                .lock()
+                .unwrap()
+                .get(target)
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        async fn send_agent_keys(&self, target: &str, keys: &[&str]) -> Result<(), HerdrHostError> {
+            self.keys.lock().unwrap().push((
+                target.to_owned(),
+                keys.iter().map(|key| (*key).to_owned()).collect(),
+            ));
             Ok(())
         }
     }
@@ -2114,6 +2344,7 @@ mod tests {
                 sample_agent("herdr-1", "w1:p1", true, "idle"),
             ],
             prompts: Arc::clone(&prompts),
+            ..FakeAgentBridge::default()
         };
         let receipt = SendPreviewContext::new(&previews, &diagnostics, &agents)
             .execute(&workspace, Some("please check the header".into()))
@@ -2150,6 +2381,7 @@ mod tests {
         let agents = FakeAgentBridge {
             agents: vec![sample_agent("other", "wX:p1", true, "idle")],
             prompts: Arc::clone(&prompts),
+            ..FakeAgentBridge::default()
         };
         let error = SendPreviewContext::new(&previews, &diagnostics, &agents)
             .execute(&workspace, None)
@@ -2193,5 +2425,216 @@ mod tests {
             lan.authorize("10.0.0.8", Some(&enabled.pairing_code))
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn listing_workspace_agents_hides_other_workspaces() {
+        let workspaces = InMemoryWorkspaceRepository::default();
+        let workspace = BindWorkspace::new(&workspaces)
+            .execute(
+                HerdrWorkspaceContext::new(
+                    "herdr-1",
+                    "Siftmark",
+                    PathBuf::from(r"C:\projects\siftmark"),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let agents = FakeAgentBridge {
+            agents: vec![
+                sample_agent("other", "wX:p1", true, "idle"),
+                sample_agent("herdr-1", "w1:p2", false, "working"),
+                sample_agent("herdr-1", "w1:p1", true, "idle"),
+            ],
+            ..FakeAgentBridge::default()
+        };
+        let listed = ListWorkspaceAgents::new(&agents)
+            .execute(&workspace)
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].pane_id, "w1:p2");
+        assert_eq!(listed[1].pane_id, "w1:p1");
+        assert!(listed.iter().all(|agent| agent.workspace_id == "herdr-1"));
+    }
+
+    #[tokio::test]
+    async fn reading_a_workspace_agent_returns_recent_transcript() {
+        let workspaces = InMemoryWorkspaceRepository::default();
+        let workspace = BindWorkspace::new(&workspaces)
+            .execute(
+                HerdrWorkspaceContext::new(
+                    "herdr-1",
+                    "Siftmark",
+                    PathBuf::from(r"C:\projects\siftmark"),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let agents = FakeAgentBridge {
+            agents: vec![sample_agent("herdr-1", "w1:p1", true, "idle")],
+            transcripts: Arc::new(std::sync::Mutex::new(
+                [("w1:p1".into(), "please approve the install".into())]
+                    .into_iter()
+                    .collect(),
+            )),
+            ..FakeAgentBridge::default()
+        };
+        let session = ReadWorkspaceAgent::new(&agents)
+            .execute(&workspace, "w1:p1")
+            .await
+            .unwrap();
+        assert_eq!(session.pane_id, "w1:p1");
+        assert_eq!(session.agent, "pi");
+        assert_eq!(session.status, "idle");
+        assert_eq!(session.transcript, "please approve the install");
+    }
+
+    #[tokio::test]
+    async fn prompting_a_ready_agent_sends_the_user_text() {
+        let workspaces = InMemoryWorkspaceRepository::default();
+        let workspace = BindWorkspace::new(&workspaces)
+            .execute(
+                HerdrWorkspaceContext::new(
+                    "herdr-1",
+                    "Siftmark",
+                    PathBuf::from(r"C:\projects\siftmark"),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let agents = FakeAgentBridge {
+            agents: vec![sample_agent("herdr-1", "w1:p1", true, "idle")],
+            prompts: Arc::clone(&prompts),
+            ..FakeAgentBridge::default()
+        };
+        PromptWorkspaceAgent::new(&agents)
+            .execute(&workspace, "w1:p1", "fix the header")
+            .await
+            .unwrap();
+        assert_eq!(
+            *prompts.lock().unwrap(),
+            vec![("w1:p1".into(), "fix the header".into())]
+        );
+    }
+
+    #[tokio::test]
+    async fn prompting_a_blocked_agent_is_rejected_without_sending_text() {
+        let workspaces = InMemoryWorkspaceRepository::default();
+        let workspace = BindWorkspace::new(&workspaces)
+            .execute(
+                HerdrWorkspaceContext::new(
+                    "herdr-1",
+                    "Siftmark",
+                    PathBuf::from(r"C:\projects\siftmark"),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let agents = FakeAgentBridge {
+            agents: vec![sample_agent("herdr-1", "w1:p1", true, "blocked")],
+            prompts: Arc::clone(&prompts),
+            ..FakeAgentBridge::default()
+        };
+        let error = PromptWorkspaceAgent::new(&agents)
+            .execute(&workspace, "w1:p1", "keep going")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("blocked"));
+        assert!(prompts.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn approving_a_blocked_agent_sends_yes_keys() {
+        let workspaces = InMemoryWorkspaceRepository::default();
+        let workspace = BindWorkspace::new(&workspaces)
+            .execute(
+                HerdrWorkspaceContext::new(
+                    "herdr-1",
+                    "Siftmark",
+                    PathBuf::from(r"C:\projects\siftmark"),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let keys = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let agents = FakeAgentBridge {
+            agents: vec![sample_agent("herdr-1", "w1:p1", true, "blocked")],
+            keys: Arc::clone(&keys),
+            ..FakeAgentBridge::default()
+        };
+        ApproveWorkspaceAgent::new(&agents)
+            .execute(&workspace, "w1:p1", AgentDecision::Yes)
+            .await
+            .unwrap();
+        assert_eq!(
+            *keys.lock().unwrap(),
+            vec![("w1:p1".into(), vec!["y".into(), "enter".into()])]
+        );
+    }
+
+    #[tokio::test]
+    async fn rejecting_a_blocked_agent_sends_no_keys() {
+        let workspaces = InMemoryWorkspaceRepository::default();
+        let workspace = BindWorkspace::new(&workspaces)
+            .execute(
+                HerdrWorkspaceContext::new(
+                    "herdr-1",
+                    "Siftmark",
+                    PathBuf::from(r"C:\projects\siftmark"),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let keys = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let agents = FakeAgentBridge {
+            agents: vec![sample_agent("herdr-1", "w1:p1", true, "blocked")],
+            keys: Arc::clone(&keys),
+            ..FakeAgentBridge::default()
+        };
+        ApproveWorkspaceAgent::new(&agents)
+            .execute(&workspace, "w1:p1", AgentDecision::No)
+            .await
+            .unwrap();
+        assert_eq!(
+            *keys.lock().unwrap(),
+            vec![("w1:p1".into(), vec!["n".into(), "enter".into()])]
+        );
+    }
+
+    #[tokio::test]
+    async fn approving_an_idle_agent_is_rejected() {
+        let workspaces = InMemoryWorkspaceRepository::default();
+        let workspace = BindWorkspace::new(&workspaces)
+            .execute(
+                HerdrWorkspaceContext::new(
+                    "herdr-1",
+                    "Siftmark",
+                    PathBuf::from(r"C:\projects\siftmark"),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let keys = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let agents = FakeAgentBridge {
+            agents: vec![sample_agent("herdr-1", "w1:p1", true, "idle")],
+            keys: Arc::clone(&keys),
+            ..FakeAgentBridge::default()
+        };
+        let error = ApproveWorkspaceAgent::new(&agents)
+            .execute(&workspace, "w1:p1", AgentDecision::Yes)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("blocked"));
+        assert!(keys.lock().unwrap().is_empty());
     }
 }

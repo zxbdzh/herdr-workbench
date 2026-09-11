@@ -16,12 +16,14 @@ use axum::{
     routing::{get, post},
 };
 use herdr_workbench_app_core::{
-    CapturePreview, EventBus, HerdrAgentBridge, LanAccess, LanDenied, LanStatus, OpenPreview,
-    PreviewAdapter, PreviewDiagnosticsSink, PreviewError, PreviewScreenshotRepository,
-    PreviewTransactionRepository, ScreenshotStore, SendPreviewContext, UnavailableAgentBridge,
+    AgentDecision, ApproveWorkspaceAgent, CapturePreview, EventBus, HerdrAgentBridge, LanAccess,
+    LanDenied, LanStatus, ListWorkspaceAgents, OpenPreview, PreviewAdapter, PreviewDiagnosticsSink,
+    PreviewError, PreviewScreenshotRepository, PreviewTransactionRepository, PromptWorkspaceAgent,
+    ReadWorkspaceAgent, ScreenshotStore, SendPreviewContext, UnavailableAgentBridge,
     WorkspaceRepository, lan_ipv4_addresses,
 };
 use herdr_workbench_contracts::{
+    AgentApproveRequest, AgentDto, AgentListResponse, AgentPromptRequest, AgentSessionResponse,
     ApiDoc, LanStatusResponse, PreviewContextSendRequest, PreviewContextSendResponse,
     PreviewDiagnosticDto, PreviewDiagnosticsResponse, PreviewOpenRequest,
     PreviewScreenshotResponse, PreviewStateResponse, WorkspaceDto, WorkspaceEventEnvelope,
@@ -121,6 +123,22 @@ where
         .route(
             "/api/v1/workspaces/{id}/context/send",
             post(send_preview_context::<W, P, A, S>),
+        )
+        .route(
+            "/api/v1/workspaces/{id}/agents",
+            get(list_workspace_agents::<W, P, A, S>),
+        )
+        .route(
+            "/api/v1/workspaces/{id}/agents/{pane_id}",
+            get(get_workspace_agent::<W, P, A, S>),
+        )
+        .route(
+            "/api/v1/workspaces/{id}/agents/{pane_id}/prompt",
+            post(prompt_workspace_agent::<W, P, A, S>),
+        )
+        .route(
+            "/api/v1/workspaces/{id}/agents/{pane_id}/approve",
+            post(approve_workspace_agent::<W, P, A, S>),
         )
         .route(
             "/ws/v1/workspaces/{id}",
@@ -536,6 +554,120 @@ where
         agent: receipt.agent,
         accepted: true,
     }))
+}
+
+fn agent_dto(agent: herdr_workbench_app_core::HerdrAgentInfo) -> AgentDto {
+    AgentDto {
+        pane_id: agent.pane_id,
+        agent: agent.agent,
+        status: agent.status,
+        focused: agent.focused,
+    }
+}
+
+fn agent_session_response(
+    session: herdr_workbench_app_core::WorkspaceAgentSession,
+) -> AgentSessionResponse {
+    AgentSessionResponse {
+        pane_id: session.pane_id,
+        agent: session.agent,
+        status: session.status,
+        focused: session.focused,
+        transcript: session.transcript,
+    }
+}
+
+async fn load_workspace<W, P, A, S>(
+    id: &str,
+    state: &AppState<W, P, A, S>,
+) -> Result<herdr_workbench_domain::Workspace, ApiError>
+where
+    W: WorkspaceRepository + 'static,
+{
+    let workspace_id = parse_workspace_id(id)?;
+    state
+        .workspaces
+        .find_by_id(&workspace_id)
+        .await
+        .map_err(ApiError::repository)?
+        .ok_or_else(|| ApiError::workspace_not_found(id.to_owned()))
+}
+
+async fn list_workspace_agents<W, P, A, S>(
+    Path(id): Path<String>,
+    State(state): State<AppState<W, P, A, S>>,
+) -> Result<Json<AgentListResponse>, ApiError>
+where
+    W: WorkspaceRepository + 'static,
+    P: PreviewTransactionRepository + PreviewScreenshotRepository + 'static,
+    A: PreviewAdapter + 'static,
+    S: ScreenshotStore + 'static,
+{
+    let workspace = load_workspace(&id, &state).await?;
+    let agents = ListWorkspaceAgents::new(state.agents.as_ref())
+        .execute(&workspace)
+        .await
+        .map_err(ApiError::application)?;
+    Ok(Json(AgentListResponse {
+        agents: agents.into_iter().map(agent_dto).collect(),
+    }))
+}
+
+async fn get_workspace_agent<W, P, A, S>(
+    Path((id, pane_id)): Path<(String, String)>,
+    State(state): State<AppState<W, P, A, S>>,
+) -> Result<Json<AgentSessionResponse>, ApiError>
+where
+    W: WorkspaceRepository + 'static,
+    P: PreviewTransactionRepository + PreviewScreenshotRepository + 'static,
+    A: PreviewAdapter + 'static,
+    S: ScreenshotStore + 'static,
+{
+    let workspace = load_workspace(&id, &state).await?;
+    let session = ReadWorkspaceAgent::new(state.agents.as_ref())
+        .execute(&workspace, &pane_id)
+        .await
+        .map_err(ApiError::application)?;
+    Ok(Json(agent_session_response(session)))
+}
+
+async fn prompt_workspace_agent<W, P, A, S>(
+    Path((id, pane_id)): Path<(String, String)>,
+    State(state): State<AppState<W, P, A, S>>,
+    Json(request): Json<AgentPromptRequest>,
+) -> Result<Json<AgentSessionResponse>, ApiError>
+where
+    W: WorkspaceRepository + 'static,
+    P: PreviewTransactionRepository + PreviewScreenshotRepository + 'static,
+    A: PreviewAdapter + 'static,
+    S: ScreenshotStore + 'static,
+{
+    let workspace = load_workspace(&id, &state).await?;
+    let session = PromptWorkspaceAgent::new(state.agents.as_ref())
+        .execute(&workspace, &pane_id, &request.text)
+        .await
+        .map_err(ApiError::application)?;
+    Ok(Json(agent_session_response(session)))
+}
+
+async fn approve_workspace_agent<W, P, A, S>(
+    Path((id, pane_id)): Path<(String, String)>,
+    State(state): State<AppState<W, P, A, S>>,
+    Json(request): Json<AgentApproveRequest>,
+) -> Result<Json<AgentSessionResponse>, ApiError>
+where
+    W: WorkspaceRepository + 'static,
+    P: PreviewTransactionRepository + PreviewScreenshotRepository + 'static,
+    A: PreviewAdapter + 'static,
+    S: ScreenshotStore + 'static,
+{
+    let workspace = load_workspace(&id, &state).await?;
+    let decision = AgentDecision::parse(&request.decision).map_err(ApiError::application)?;
+    let session = ApproveWorkspaceAgent::new(state.agents.as_ref())
+        .execute(&workspace, &pane_id, decision)
+        .await
+        .map_err(ApiError::application)?;
+    Ok(Json(agent_session_response(session)))
 }
 
 async fn workspace_events<W, P, A, S>(
@@ -1284,10 +1416,16 @@ mod tests {
         assert_eq!(json["diagnostics"], serde_json::json!([]));
     }
 
+    type PromptLog = Arc<std::sync::Mutex<Vec<(String, String)>>>;
+    type TranscriptMap = Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>;
+    type KeyLog = Arc<std::sync::Mutex<Vec<(String, Vec<String>)>>>;
+
     #[derive(Default)]
     struct FakeAgentBridge {
         agents: Vec<herdr_workbench_app_core::HerdrAgentInfo>,
-        prompts: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+        prompts: PromptLog,
+        transcripts: TranscriptMap,
+        keys: KeyLog,
     }
 
     #[async_trait]
@@ -1310,6 +1448,31 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((target.to_owned(), text.to_owned()));
+            Ok(())
+        }
+
+        async fn read_agent(
+            &self,
+            target: &str,
+        ) -> Result<String, herdr_workbench_app_core::HerdrHostError> {
+            Ok(self
+                .transcripts
+                .lock()
+                .unwrap()
+                .get(target)
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        async fn send_agent_keys(
+            &self,
+            target: &str,
+            keys: &[&str],
+        ) -> Result<(), herdr_workbench_app_core::HerdrHostError> {
+            self.keys.lock().unwrap().push((
+                target.to_owned(),
+                keys.iter().map(|key| (*key).to_owned()).collect(),
+            ));
             Ok(())
         }
     }
@@ -1356,6 +1519,7 @@ mod tests {
                 focused: true,
             }],
             prompts: Arc::clone(&prompts),
+            ..FakeAgentBridge::default()
         };
         let state = AppState::new(
             workspaces,
@@ -1394,6 +1558,197 @@ mod tests {
         assert!(recorded[0].1.contains("http://localhost:3000"));
         assert!(recorded[0].1.contains("boom"));
         assert!(recorded[0].1.contains("please check the header"));
+    }
+
+    #[tokio::test]
+    async fn workspace_agent_routes_list_read_prompt_and_approve() {
+        let workspaces = Arc::new(InMemoryWorkspaceRepository::default());
+        let workspace = BindWorkspace::new(workspaces.as_ref())
+            .execute(
+                HerdrWorkspaceContext::new(
+                    "herdr-1",
+                    "Siftmark",
+                    std::path::PathBuf::from(r"C:\projects\siftmark"),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let idle = FakeAgentBridge {
+            agents: vec![
+                herdr_workbench_app_core::HerdrAgentInfo {
+                    workspace_id: "other".into(),
+                    pane_id: "wX:p1".into(),
+                    agent: "pi".into(),
+                    status: "idle".into(),
+                    focused: true,
+                },
+                herdr_workbench_app_core::HerdrAgentInfo {
+                    workspace_id: "herdr-1".into(),
+                    pane_id: "w1:p1".into(),
+                    agent: "pi".into(),
+                    status: "idle".into(),
+                    focused: true,
+                },
+            ],
+            prompts: Arc::clone(&prompts),
+            transcripts: Arc::new(std::sync::Mutex::new(
+                [("w1:p1".into(), "ready for the next task".into())]
+                    .into_iter()
+                    .collect(),
+            )),
+            ..FakeAgentBridge::default()
+        };
+        let listed = router(AppState::new(
+            Arc::clone(&workspaces),
+            Arc::new(InMemoryPreviewRepository::default()),
+            Arc::new(FakePreviewAdapter),
+            Arc::new(EventBus::new(8)),
+            Arc::new(InMemoryScreenshotStore::default()),
+            Arc::new(InMemoryPreviewDiagnostics::default()),
+            Arc::new(idle),
+        ))
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/v1/workspaces/{}/agents",
+                    workspace.workspace_id.as_uuid()
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let listed: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(listed.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(listed["agents"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["agents"][0]["pane_id"], "w1:p1");
+
+        let transcript = router(AppState::new(
+            Arc::clone(&workspaces),
+            Arc::new(InMemoryPreviewRepository::default()),
+            Arc::new(FakePreviewAdapter),
+            Arc::new(EventBus::new(8)),
+            Arc::new(InMemoryScreenshotStore::default()),
+            Arc::new(InMemoryPreviewDiagnostics::default()),
+            Arc::new(FakeAgentBridge {
+                agents: vec![herdr_workbench_app_core::HerdrAgentInfo {
+                    workspace_id: "herdr-1".into(),
+                    pane_id: "w1:p1".into(),
+                    agent: "pi".into(),
+                    status: "idle".into(),
+                    focused: true,
+                }],
+                transcripts: Arc::new(std::sync::Mutex::new(
+                    [("w1:p1".into(), "ready for the next task".into())]
+                        .into_iter()
+                        .collect(),
+                )),
+                ..FakeAgentBridge::default()
+            }),
+        ))
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/v1/workspaces/{}/agents/w1:p1",
+                    workspace.workspace_id.as_uuid()
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(transcript.status(), StatusCode::OK);
+        let transcript: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(transcript.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(transcript["transcript"], "ready for the next task");
+
+        let prompted = router(AppState::new(
+            Arc::clone(&workspaces),
+            Arc::new(InMemoryPreviewRepository::default()),
+            Arc::new(FakePreviewAdapter),
+            Arc::new(EventBus::new(8)),
+            Arc::new(InMemoryScreenshotStore::default()),
+            Arc::new(InMemoryPreviewDiagnostics::default()),
+            Arc::new(FakeAgentBridge {
+                agents: vec![herdr_workbench_app_core::HerdrAgentInfo {
+                    workspace_id: "herdr-1".into(),
+                    pane_id: "w1:p1".into(),
+                    agent: "pi".into(),
+                    status: "idle".into(),
+                    focused: true,
+                }],
+                prompts: Arc::clone(&prompts),
+                ..FakeAgentBridge::default()
+            }),
+        ))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/v1/workspaces/{}/agents/w1:p1/prompt",
+                    workspace.workspace_id.as_uuid()
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"text":"fix the header"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(prompted.status(), StatusCode::OK);
+        assert_eq!(
+            *prompts.lock().unwrap(),
+            vec![("w1:p1".into(), "fix the header".into())]
+        );
+
+        let blocked_keys = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let approved = router(AppState::new(
+            workspaces,
+            Arc::new(InMemoryPreviewRepository::default()),
+            Arc::new(FakePreviewAdapter),
+            Arc::new(EventBus::new(8)),
+            Arc::new(InMemoryScreenshotStore::default()),
+            Arc::new(InMemoryPreviewDiagnostics::default()),
+            Arc::new(FakeAgentBridge {
+                agents: vec![herdr_workbench_app_core::HerdrAgentInfo {
+                    workspace_id: "herdr-1".into(),
+                    pane_id: "w1:p1".into(),
+                    agent: "pi".into(),
+                    status: "blocked".into(),
+                    focused: true,
+                }],
+                keys: Arc::clone(&blocked_keys),
+                ..FakeAgentBridge::default()
+            }),
+        ))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/v1/workspaces/{}/agents/w1:p1/approve",
+                    workspace.workspace_id.as_uuid()
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"decision":"yes"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(approved.status(), StatusCode::OK);
+        assert_eq!(
+            *blocked_keys.lock().unwrap(),
+            vec![("w1:p1".into(), vec!["y".into(), "enter".into()])]
+        );
     }
 
     #[tokio::test]

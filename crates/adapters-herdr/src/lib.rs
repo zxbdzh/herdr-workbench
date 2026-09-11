@@ -5,8 +5,8 @@ use std::{
 
 use async_trait::async_trait;
 use herdr_workbench_app_core::{
-    HerdrAgentBridge, HerdrAgentInfo, HerdrEventSource, HerdrHost, HerdrHostError,
-    HerdrLifecycleEvent, HerdrPaneInfo, HerdrWorkspaceInfo,
+    AGENT_TRANSCRIPT_LINES, HerdrAgentBridge, HerdrAgentInfo, HerdrEventSource, HerdrHost,
+    HerdrHostError, HerdrLifecycleEvent, HerdrPaneInfo, HerdrWorkspaceInfo,
 };
 use serde::Deserialize;
 use tokio::process::Command;
@@ -174,6 +174,26 @@ pub fn parse_agent_list(stdout: &str) -> Result<Vec<HerdrAgentInfo>, HerdrHostEr
         .collect())
 }
 
+fn agent_read_args(target: &str) -> Vec<String> {
+    vec![
+        "agent".into(),
+        "read".into(),
+        target.into(),
+        "--source".into(),
+        "recent".into(),
+        "--lines".into(),
+        AGENT_TRANSCRIPT_LINES.to_string(),
+        "--format".into(),
+        "text".into(),
+    ]
+}
+
+fn agent_send_keys_args(target: &str, keys: &[&str]) -> Vec<String> {
+    let mut args = vec!["agent".into(), "send-keys".into(), target.into()];
+    args.extend(keys.iter().map(|key| (*key).to_string()));
+    args
+}
+
 #[async_trait]
 impl HerdrAgentBridge for HerdrCliHost {
     async fn list_agents(&self) -> Result<Vec<HerdrAgentInfo>, HerdrHostError> {
@@ -183,6 +203,19 @@ impl HerdrAgentBridge for HerdrCliHost {
 
     async fn prompt_agent(&self, target: &str, text: &str) -> Result<(), HerdrHostError> {
         let _ = run_herdr(&self.binary, &["agent", "prompt", target, text]).await?;
+        Ok(())
+    }
+
+    async fn read_agent(&self, target: &str) -> Result<String, HerdrHostError> {
+        let args = agent_read_args(target);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        run_herdr(&self.binary, &argv).await
+    }
+
+    async fn send_agent_keys(&self, target: &str, keys: &[&str]) -> Result<(), HerdrHostError> {
+        let args = agent_send_keys_args(target, keys);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        let _ = run_herdr(&self.binary, &argv).await?;
         Ok(())
     }
 }
@@ -352,8 +385,8 @@ impl HerdrEventSource for HerdrNamedPipeEventSource {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_agent_list, parse_lifecycle_event, parse_pane_list, parse_subscription_ack,
-        parse_workspace_list, windows_named_pipe_path,
+        agent_read_args, agent_send_keys_args, parse_agent_list, parse_lifecycle_event,
+        parse_pane_list, parse_subscription_ack, parse_workspace_list, windows_named_pipe_path,
     };
     use herdr_workbench_app_core::HerdrLifecycleEvent;
     use std::path::{Path, PathBuf};
@@ -445,5 +478,28 @@ mod tests {
         assert!(agents[0].focused);
         assert_eq!(agents[1].agent, "claude");
         assert!(!agents[1].focused);
+    }
+
+    #[test]
+    fn agent_read_uses_recent_plain_text_argv() {
+        assert_eq!(
+            agent_read_args("wD:p3M"),
+            vec![
+                "agent", "read", "wD:p3M", "--source", "recent", "--lines", "80", "--format",
+                "text",
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_send_keys_appends_yes_or_no_without_a_shell() {
+        assert_eq!(
+            agent_send_keys_args("wD:p3M", &["y", "enter"]),
+            vec!["agent", "send-keys", "wD:p3M", "y", "enter"]
+        );
+        assert_eq!(
+            agent_send_keys_args("wD:p3M", &["n", "enter"]),
+            vec!["agent", "send-keys", "wD:p3M", "n", "enter"]
+        );
     }
 }
