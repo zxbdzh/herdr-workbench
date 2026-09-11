@@ -20,6 +20,30 @@ interface WorkspaceEventEnvelope {
   };
 }
 interface ApiError { error?: { code?: string; message?: string }; }
+interface LanStatus { enabled: boolean; listen: string; urls: string[]; pairing_code?: string | null; can_manage?: boolean; }
+
+const PAIR_STORAGE = "herdr-workbench-pair";
+const isPairingError = (message: string) => message.toLowerCase().includes("pairing code");
+
+const readPair = () => {
+  const query = new URLSearchParams(window.location.search).get("pair");
+  if (query) {
+    sessionStorage.setItem(PAIR_STORAGE, query);
+    return query;
+  }
+  return sessionStorage.getItem(PAIR_STORAGE);
+};
+
+const pairHeaders = (): Record<string, string> => {
+  const pair = readPair();
+  return pair ? { "x-workbench-pair": pair } : {};
+};
+
+const withPair = (path: string) => {
+  const pair = readPair();
+  if (!pair) return path;
+  return `${path}${path.includes("?") ? "&" : "?"}pair=${encodeURIComponent(pair)}`;
+};
 
 const previewFromEnvelope = (event: WorkspaceEventEnvelope): PreviewState | null => {
   if (
@@ -39,17 +63,20 @@ const previewFromEnvelope = (event: WorkspaceEventEnvelope): PreviewState | null
 
 const workspaceSocketUrl = (workspaceId: string) => {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}/ws/v1/workspaces/${workspaceId}`;
+  return withPair(`${protocol}//${window.location.host}/ws/v1/workspaces/${workspaceId}`);
 };
 
 const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
-  const response = await fetch(path, { headers: { "content-type": "application/json", ...init?.headers }, ...init });
+  const response = await fetch(withPair(path), {
+    headers: { "content-type": "application/json", ...pairHeaders(), ...init?.headers },
+    ...init,
+  });
   const raw = await response.text();
   let body: T & ApiError;
   try {
     body = JSON.parse(raw) as T & ApiError;
   } catch {
-    throw new Error("Workbench API 没有从 localhost 返回 JSON");
+    throw new Error("Workbench API 没有返回 JSON");
   }
   if (!response.ok) throw new Error(body.error?.message ?? `请求失败：${response.status}`);
   return body as T;
@@ -67,6 +94,10 @@ function App() {
   const [diagnostics, setDiagnostics] = useState<Record<string, PreviewDiagnostic[]>>({});
   const [sent, setSent] = useState<Record<string, string>>({});
   const [urls, setUrls] = useState<Record<string, string>>({});
+  const [lan, setLan] = useState<LanStatus | null>(null);
+  const [pairDraft, setPairDraft] = useState(readPair() ?? "");
+  const [needsPair, setNeedsPair] = useState(false);
+  const [lanBusy, setLanBusy] = useState(false);
 
   useEffect(() => {
     let stopped = false;
@@ -77,11 +108,13 @@ function App() {
           if (stopped) return;
           setHealth(healthResponse);
           setWorkspaces(workspaceResponse.workspaces);
+          setNeedsPair(false);
           setError(null);
           timer = window.setTimeout(load, nextWorkspaceListRefreshMs(workspaceResponse.workspaces.length));
         })
         .catch((reason: Error) => {
           if (stopped) return;
+          if (isPairingError(reason.message)) setNeedsPair(true);
           setError(reason.message);
           timer = window.setTimeout(load, nextWorkspaceListRefreshMs(0));
         });
@@ -153,6 +186,35 @@ function App() {
     return () => subscriptions.forEach((stop) => stop());
   }, [workspaces]);
 
+  useEffect(() => {
+    api<LanStatus>("/api/v1/lan")
+      .then(setLan)
+      .catch((reason: Error) => {
+        if (isPairingError(reason.message)) setNeedsPair(true);
+      });
+  }, []);
+
+  const savePair = () => {
+    const pair = pairDraft.trim();
+    if (!pair) return;
+    sessionStorage.setItem(PAIR_STORAGE, pair);
+    setNeedsPair(false);
+    window.location.reload();
+  };
+
+  const toggleLan = async (enable: boolean) => {
+    setLanBusy(true);
+    setError(null);
+    try {
+      const status = await api<LanStatus>(enable ? "/api/v1/lan/enable" : "/api/v1/lan/disable", { method: "POST" });
+      setLan(status);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "无法切换局域网");
+    } finally {
+      setLanBusy(false);
+    }
+  };
+
   const previewUrl = (workspace: Workspace) => {
     const value = urls[workspace.workspace_id]?.trim();
     return value ? value : undefined;
@@ -180,12 +242,17 @@ function App() {
         method: "POST",
         body: JSON.stringify({ url: previewUrl(workspace) }),
       });
-      const response = await fetch(`/api/v1/workspaces/${workspace.workspace_id}/preview/screenshot`, { method: "POST" });
+      const response = await fetch(withPair(`/api/v1/workspaces/${workspace.workspace_id}/preview/screenshot`), {
+        method: "POST",
+        headers: pairHeaders(),
+      });
       if (!response.ok) {
         const body = await response.json() as ApiError;
         throw new Error(body.error?.message ?? `请求失败：${response.status}`);
       }
-      const image = await fetch(`/api/v1/workspaces/${workspace.workspace_id}/preview/screenshot`);
+      const image = await fetch(withPair(`/api/v1/workspaces/${workspace.workspace_id}/preview/screenshot`), {
+        headers: pairHeaders(),
+      });
       if (!image.ok) throw new Error(`无法读取截图：${image.status}`);
       const blob = await image.blob();
       const url = URL.createObjectURL(blob);
@@ -235,6 +302,33 @@ function App() {
         <div className={`status ${health?.status === "ready" ? "ready" : ""}`}><span className="status-dot" />{health?.status === "ready" ? "Host ready" : "Connecting"}</div>
       </header>
       {error && <div className="notice error">{error}</div>}
+      {needsPair && (
+        <section className="lan-panel">
+          <p className="eyebrow">LAN PAIRING</p>
+          <h2>输入本机控制台显示的配对码</h2>
+          <p>手机和另一台电脑打开同一套页面后，先填 6 位配对码，才能看工作区和截图。</p>
+          <div className="lan-row">
+            <input className="preview-url" value={pairDraft} placeholder="123456" inputMode="numeric" onChange={(event) => setPairDraft(event.target.value)} />
+            <button className="preview-button" type="button" onClick={savePair}>连接</button>
+          </div>
+        </section>
+      )}
+      {lan && (
+        <section className="lan-panel">
+          <p className="eyebrow">LAN ACCESS</p>
+          <h2>{lan.enabled ? "局域网已开启" : "默认只听本机"}</h2>
+          <p>{lan.enabled ? "手机或另一台电脑打开下面的地址，输入配对码后看同一套 Preview 和截图。Windows 防火墙如果拦了，放行 17321。" : "点开启后会再听 0.0.0.0:17321，并显示局域网地址和一次性配对码。文件浏览下一刀再做。"}</p>
+          {lan.can_manage && (
+            <div className="lan-row">
+              <button className="preview-button" type="button" disabled={lanBusy} onClick={() => toggleLan(!lan.enabled)}>{lanBusy ? "切换中..." : lan.enabled ? "关闭局域网" : "开启局域网"}</button>
+              {lan.enabled && lan.pairing_code ? <strong className="pair-code">{lan.pairing_code}</strong> : null}
+            </div>
+          )}
+          {lan.enabled && lan.urls.length > 0 && (
+            <ul className="lan-urls">{lan.urls.map((url) => <li key={url}><code>{url}</code></li>)}</ul>
+          )}
+        </section>
+      )}
       <section className="summary-grid" aria-label="Host summary">
         <article className="metric"><span className="metric-label">HOST STATUS</span><strong>{health?.status ?? "--"}</strong></article>
         <article className="metric"><span className="metric-label">WORKSPACES</span><strong>{workspaces?.length ?? "--"}</strong></article>
@@ -259,7 +353,7 @@ function App() {
           </article>;
         })}
       </section>
-      <footer><span>Herdr Workbench P0</span><span>localhost · Windows-first</span></footer>
+      <footer><span>Herdr Workbench 0.2</span><span>{lan?.enabled ? "LAN · same UI" : "localhost · Windows-first"}</span></footer>
     </main>
   );
 }

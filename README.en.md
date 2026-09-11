@@ -6,7 +6,7 @@
 
 [中文](README.md)
 
-**Send a real WebView2 preview, screenshot, and diagnostics to the current Herdr agent.** This is a Windows-first workbench, not a browser extension and not remote desktop.
+**Send a real WebView2 preview, screenshot, and diagnostics to the current Herdr agent.** The same Web UI can also be opened from another computer or a phone. This is a Windows-first workbench, not a browser extension and not remote desktop.
 
 <sub>// Windows-first · Herdr · WebView2 · Browser-to-Agent</sub>
 
@@ -25,11 +25,12 @@
 
 After a coding agent changes the frontend, you still open a browser, read the console, and paste errors back. A remote computer or phone cannot see localhost at all. Herdr Workbench binds Herdr workspaces on Windows, opens an isolated WebView2 preview, captures real page state, and sends structured feedback to the current agent.
 
-v0.1 covers this local loop. LAN / phone / file editing are not in this release.
+v0.2 covers the local loop and an explicit LAN opt-in so another computer or phone can view the same Preview and screenshots. File browsing is not in this release.
 
 ## Features
 
 - 🖥️ **Windows host** — one Tauri process embeds Axum and listens on `127.0.0.1:17321` by default
+- 📱 **Same UI on LAN** — enable LAN on the host to listen on `0.0.0.0:17321`; another computer or phone enters the pairing code to see workspaces, Preview state, and screenshots
 - 🔗 **Herdr binding** — syncs workspaces from the Herdr CLI on startup; Named Pipe events rebind immediately, with a 30s/2min reconcile fallback
 - 🌐 **WebView2 preview** — one reusable preview window per workspace
 - 📸 **Screenshot and diagnostics** — PNG screenshots plus in-memory console / network diagnostics
@@ -40,9 +41,10 @@ v0.1 covers this local loop. LAN / phone / file editing are not in this release.
 
 Requires Windows 10/11 and [Herdr](https://herdr.dev) on the same machine.
 
-1. Download `Herdr Workbench_0.1.5_x64-setup.exe` from [Releases](https://github.com/zxbdzh/herdr-workbench/releases)
+1. Download `Herdr Workbench_0.2.0_x64-setup.exe` from [Releases](https://github.com/zxbdzh/herdr-workbench/releases)
 2. Install and launch
 3. Start Herdr first, then Workbench; the workspace list syncs from local Herdr
+4. For a phone or another computer: enable LAN on the host, note the pairing code, open `http://<lan-ip>:17321/` and enter the code
 
 Developers can also run the debug executable:
 

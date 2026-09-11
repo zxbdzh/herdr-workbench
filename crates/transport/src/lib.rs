@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
 
 use axum::{
     Json, Router,
@@ -7,20 +10,22 @@ use axum::{
         Path, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::{HeaderValue, StatusCode, header::CONTENT_TYPE},
+    http::{HeaderValue, Request, StatusCode, header::CONTENT_TYPE},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use herdr_workbench_app_core::{
-    CapturePreview, EventBus, HerdrAgentBridge, OpenPreview, PreviewAdapter,
-    PreviewDiagnosticsSink, PreviewError, PreviewScreenshotRepository,
+    CapturePreview, EventBus, HerdrAgentBridge, LanAccess, LanDenied, LanStatus, OpenPreview,
+    PreviewAdapter, PreviewDiagnosticsSink, PreviewError, PreviewScreenshotRepository,
     PreviewTransactionRepository, ScreenshotStore, SendPreviewContext, UnavailableAgentBridge,
-    WorkspaceRepository,
+    WorkspaceRepository, lan_ipv4_addresses,
 };
 use herdr_workbench_contracts::{
-    ApiDoc, PreviewContextSendRequest, PreviewContextSendResponse, PreviewDiagnosticDto,
-    PreviewDiagnosticsResponse, PreviewOpenRequest, PreviewScreenshotResponse,
-    PreviewStateResponse, WorkspaceDto, WorkspaceEventEnvelope, WorkspaceListResponse,
+    ApiDoc, LanStatusResponse, PreviewContextSendRequest, PreviewContextSendResponse,
+    PreviewDiagnosticDto, PreviewDiagnosticsResponse, PreviewOpenRequest,
+    PreviewScreenshotResponse, PreviewStateResponse, WorkspaceDto, WorkspaceEventEnvelope,
+    WorkspaceListResponse,
 };
 use rust_embed::RustEmbed;
 use utoipa::OpenApi;
@@ -37,6 +42,8 @@ pub struct AppState<W, P, A, S> {
     pub screenshots: Arc<S>,
     pub diagnostics: Arc<dyn PreviewDiagnosticsSink>,
     pub agents: Arc<dyn HerdrAgentBridge>,
+    pub lan: Arc<Mutex<LanAccess>>,
+    pub lan_bind: Option<tokio::sync::watch::Sender<bool>>,
 }
 
 impl<W, P, A, S> Clone for AppState<W, P, A, S> {
@@ -49,6 +56,8 @@ impl<W, P, A, S> Clone for AppState<W, P, A, S> {
             screenshots: Arc::clone(&self.screenshots),
             diagnostics: Arc::clone(&self.diagnostics),
             agents: Arc::clone(&self.agents),
+            lan: Arc::clone(&self.lan),
+            lan_bind: self.lan_bind.clone(),
         }
     }
 }
@@ -71,6 +80,8 @@ impl<W, P, A, S> AppState<W, P, A, S> {
             screenshots,
             diagnostics,
             agents,
+            lan: Arc::new(Mutex::new(LanAccess::default())),
+            lan_bind: None,
         }
     }
 }
@@ -115,6 +126,16 @@ where
             "/ws/v1/workspaces/{id}",
             get(workspace_events::<W, P, A, S>),
         )
+        .route("/api/v1/lan", get(get_lan::<W, P, A, S>))
+        .route("/api/v1/lan/enable", post(enable_lan::<W, P, A, S>))
+        .route("/api/v1/lan/disable", post(disable_lan::<W, P, A, S>))
+        .layer(middleware::from_fn({
+            let lan = Arc::clone(&state.lan);
+            move |request: Request<Body>, next: Next| {
+                let lan = Arc::clone(&lan);
+                async move { lan_guard(lan, request, next).await }
+            }
+        }))
         .with_state(state)
 }
 
@@ -132,6 +153,155 @@ pub fn empty_router() -> Router {
 
 async fn health() -> (StatusCode, Json<serde_json::Value>) {
     (StatusCode::OK, Json(serde_json::json!({"status": "ready"})))
+}
+
+async fn lan_guard(lan: Arc<Mutex<LanAccess>>, request: Request<Body>, next: Next) -> Response {
+    let peer = peer_ip(&request);
+    if is_loopback_ip(&peer) {
+        return next.run(request).await;
+    }
+
+    let path = request.uri().path().to_owned();
+    let pair = pairing_code_from(&request);
+    let allowed = {
+        let lan = lan.lock().unwrap_or_else(|error| error.into_inner());
+        lan.enabled() && (is_public_ui(&path) || lan.authorize(&peer, pair.as_deref()).is_ok())
+    };
+    if !allowed {
+        return ApiError::lan_denied(LanDenied::pairing_required()).into_response();
+    }
+    next.run(request).await
+}
+
+async fn get_lan<W, P, A, S>(
+    State(state): State<AppState<W, P, A, S>>,
+    request: Request<Body>,
+) -> Json<LanStatusResponse>
+where
+    W: WorkspaceRepository + 'static,
+    P: PreviewTransactionRepository + PreviewScreenshotRepository + 'static,
+    A: PreviewAdapter + 'static,
+    S: ScreenshotStore + 'static,
+{
+    let reveal_code = is_loopback_ip(&peer_ip(&request));
+    let lan = state.lan.lock().unwrap_or_else(|error| error.into_inner());
+    Json(lan_status_response(lan.status(), reveal_code))
+}
+
+async fn enable_lan<W, P, A, S>(
+    State(state): State<AppState<W, P, A, S>>,
+    request: Request<Body>,
+) -> Result<Json<LanStatusResponse>, ApiError>
+where
+    W: WorkspaceRepository + 'static,
+    P: PreviewTransactionRepository + PreviewScreenshotRepository + 'static,
+    A: PreviewAdapter + 'static,
+    S: ScreenshotStore + 'static,
+{
+    require_localhost(&request)?;
+    let status = {
+        let mut lan = state.lan.lock().unwrap_or_else(|error| error.into_inner());
+        lan.enable(lan_ipv4_addresses())
+    };
+    if let Some(bind) = &state.lan_bind {
+        let _ = bind.send(true);
+    }
+    Ok(Json(lan_status_response(status, true)))
+}
+
+async fn disable_lan<W, P, A, S>(
+    State(state): State<AppState<W, P, A, S>>,
+    request: Request<Body>,
+) -> Result<Json<LanStatusResponse>, ApiError>
+where
+    W: WorkspaceRepository + 'static,
+    P: PreviewTransactionRepository + PreviewScreenshotRepository + 'static,
+    A: PreviewAdapter + 'static,
+    S: ScreenshotStore + 'static,
+{
+    require_localhost(&request)?;
+    let status = {
+        let mut lan = state.lan.lock().unwrap_or_else(|error| error.into_inner());
+        lan.disable();
+        lan.status()
+    };
+    if let Some(bind) = &state.lan_bind {
+        let _ = bind.send(false);
+    }
+    Ok(Json(lan_status_response(status, true)))
+}
+
+fn require_localhost(request: &Request<Body>) -> Result<(), ApiError> {
+    if is_loopback_ip(&peer_ip(request)) {
+        Ok(())
+    } else {
+        Err(ApiError::lan_denied(LanDenied::pairing_required()))
+    }
+}
+
+fn lan_status_response(status: LanStatus, reveal_code: bool) -> LanStatusResponse {
+    LanStatusResponse {
+        enabled: status.enabled,
+        listen: status.listen,
+        urls: status.urls,
+        pairing_code: reveal_code
+            .then_some(status.pairing_code)
+            .filter(|code| !code.is_empty()),
+        can_manage: reveal_code,
+    }
+}
+
+fn peer_ip(request: &Request<Body>) -> String {
+    if let Some(axum::extract::ConnectInfo(addr)) = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<SocketAddr>>()
+    {
+        return addr.ip().to_string();
+    }
+    request
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("127.0.0.1")
+        .to_owned()
+}
+
+fn pairing_code_from(request: &Request<Body>) -> Option<String> {
+    if let Some(value) = request.headers().get("x-workbench-pair")
+        && let Ok(text) = value.to_str()
+    {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_owned());
+        }
+    }
+    request.uri().query().and_then(|query| {
+        query.split('&').find_map(|part| {
+            let mut parts = part.splitn(2, '=');
+            match (parts.next(), parts.next()) {
+                (Some("pair"), Some(value)) if !value.is_empty() => Some(value.to_owned()),
+                _ => None,
+            }
+        })
+    })
+}
+
+fn is_public_ui(path: &str) -> bool {
+    path == "/"
+        || path == "/app"
+        || path == "/app/"
+        || path.starts_with("/app/")
+        || path.starts_with("/assets/")
+}
+
+fn is_loopback_ip(peer_ip: &str) -> bool {
+    peer_ip == "127.0.0.1"
+        || peer_ip == "::1"
+        || peer_ip == "localhost"
+        || peer_ip == "::ffff:127.0.0.1"
 }
 
 async fn openapi() -> Json<utoipa::openapi::OpenApi> {
@@ -607,6 +777,14 @@ impl ApiError {
         }
     }
 
+    fn lan_denied(error: LanDenied) -> Self {
+        Self {
+            code: "lan_denied",
+            message: error.to_string(),
+            status: StatusCode::FORBIDDEN,
+        }
+    }
+
     fn repository(error: herdr_workbench_app_core::RepositoryError) -> Self {
         Self {
             code: "internal_error",
@@ -696,6 +874,140 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn lan_requests_need_a_pairing_code_after_enable() {
+        let app = empty_router();
+        let denied = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/health")
+                    .header("x-forwarded-for", "10.0.0.8")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+        let enabled = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/lan/enable")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(enabled.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(enabled.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["enabled"], true);
+        assert_eq!(json["listen"], "0.0.0.0:17321");
+        let code = json["pairing_code"]
+            .as_str()
+            .expect("pairing code")
+            .to_owned();
+        assert_eq!(code.len(), 6);
+
+        let ui = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header("x-forwarded-for", "10.0.0.8")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ui.status(), StatusCode::OK);
+
+        let still_denied = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/health")
+                    .header("x-forwarded-for", "10.0.0.8")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(still_denied.status(), StatusCode::FORBIDDEN);
+
+        let allowed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/health")
+                    .header("x-forwarded-for", "10.0.0.8")
+                    .header("x-workbench-pair", &code)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(allowed.status(), StatusCode::OK);
+
+        let query = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/workspaces?pair={code}"))
+                    .header("x-forwarded-for", "10.0.0.8")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(query.status(), StatusCode::OK);
+
+        let remote_enable = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/lan/enable")
+                    .header("x-forwarded-for", "10.0.0.8")
+                    .header("x-workbench-pair", &code)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(remote_enable.status(), StatusCode::FORBIDDEN);
+
+        let disabled = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/lan/disable")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(disabled.status(), StatusCode::OK);
+        let closed = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/health")
+                    .header("x-forwarded-for", "10.0.0.8")
+                    .header("x-workbench-pair", &code)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(closed.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
