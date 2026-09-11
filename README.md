@@ -40,7 +40,7 @@ v0.1 覆盖本机这条闭环。LAN / 手机 / 文件编辑还没做。
 
 需要：Windows 10/11、本机已安装 [Herdr](https://herdr.dev)。
 
-1. 打开 [Releases](https://github.com/zxbdzh/herdr-workbench/releases) 下载 `Herdr Workbench_0.1.3_x64-setup.exe`
+1. 打开 [Releases](https://github.com/zxbdzh/herdr-workbench/releases) 下载 `Herdr Workbench_0.1.4_x64-setup.exe`
 2. 安装并启动
 3. 先打开 Herdr，再打开 Workbench；工作区列表会从本机 Herdr 同步
 
