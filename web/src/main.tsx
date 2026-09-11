@@ -2,6 +2,7 @@ import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 import { nextWorkspaceSocketAction } from "./workspaceSocket";
+import { nextWorkspaceListRefreshMs } from "./workspaceList";
 
 interface HealthResponse { status: string; }
 interface Workspace { workspace_id: string; herdr_workspace_id: string; label: string; cwd: string; revision: number; }
@@ -67,9 +68,28 @@ function App() {
   const [sent, setSent] = useState<Record<string, string>>({});
 
   useEffect(() => {
-    Promise.all([api<HealthResponse>("/api/v1/health"), api<WorkspaceListResponse>("/api/v1/workspaces")])
-      .then(([healthResponse, workspaceResponse]) => { setHealth(healthResponse); setWorkspaces(workspaceResponse.workspaces); })
-      .catch((reason: Error) => setError(reason.message));
+    let stopped = false;
+    let timer: number | undefined;
+    const load = () => {
+      Promise.all([api<HealthResponse>("/api/v1/health"), api<WorkspaceListResponse>("/api/v1/workspaces")])
+        .then(([healthResponse, workspaceResponse]) => {
+          if (stopped) return;
+          setHealth(healthResponse);
+          setWorkspaces(workspaceResponse.workspaces);
+          setError(null);
+          timer = window.setTimeout(load, nextWorkspaceListRefreshMs(workspaceResponse.workspaces.length));
+        })
+        .catch((reason: Error) => {
+          if (stopped) return;
+          setError(reason.message);
+          timer = window.setTimeout(load, nextWorkspaceListRefreshMs(0));
+        });
+    };
+    load();
+    return () => {
+      stopped = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
   }, []);
 
   useEffect(() => {
@@ -213,7 +233,7 @@ function App() {
       <section className="section-heading"><div><p className="eyebrow">WORKSPACE REGISTRY</p><h2>已绑定工作区</h2></div><span className="count">{workspaces?.length ?? 0} 个</span></section>
       <section className="workspace-list" aria-live="polite">
         {workspaces === null && <div className="empty">正在读取 workspace 状态...</div>}
-        {workspaces?.length === 0 && <div className="empty"><span className="empty-mark">/</span><strong>还没有绑定工作区</strong><p>启动时会从本机 Herdr 同步 workspace。Herdr 没在跑时，这里会是空的。</p></div>}
+        {workspaces?.length === 0 && <div className="empty"><span className="empty-mark">/</span><strong>还没有绑定工作区</strong><p>正在从本机 Herdr 同步。如果 Herdr 刚打开，列表会在几秒内出现。</p></div>}
         {workspaces?.map((workspace) => {
           const preview = previews[workspace.workspace_id];
           return <article className="workspace" key={workspace.workspace_id}>
