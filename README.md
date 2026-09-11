@@ -6,7 +6,7 @@
 
 [English](README.en.md)
 
-**把本机 WebView2 预览、截图和诊断发给当前 Herdr Agent。** 这是 Windows-first 的工作台，不是浏览器插件，也不是远程桌面。
+**把本机 WebView2 预览、截图和诊断发给当前 Herdr Agent。** 同一套 Web UI 也能从另一台电脑或手机连上来看。这是 Windows-first 的工作台，不是浏览器插件，也不是远程桌面。
 
 <sub>// Windows-first · Herdr · WebView2 · Browser-to-Agent</sub>
 
@@ -25,11 +25,12 @@
 
 Coding Agent 改完前端，你还得自己开浏览器、看 console、再把报错贴回去。远程电脑或手机更没法看见本机 localhost。——Herdr Workbench 在 Windows 上绑住 Herdr workspace，打开独立 WebView2 预览，采集真实页面状态，再把结构化反馈发给当前 Agent。
 
-v0.1 覆盖本机这条闭环。LAN / 手机 / 文件编辑还没做。
+v0.2 覆盖本机闭环，并允许显式开启局域网后用同一套 UI 看 Preview 和截图。文件浏览还没做。
 
 ## 功能
 
 - 🖥️ **Windows 主机** — 单个 Tauri 进程内嵌 Axum，默认只听 `127.0.0.1:17321`
+- 📱 **局域网同一套 UI** — 本机点「开启局域网」后听 `0.0.0.0:17321`，手机/另一台电脑输入配对码看工作区、Preview 状态和截图
 - 🔗 **Herdr 绑定** — 启动时从 Herdr CLI 同步 workspace；Named Pipe 事件立刻补绑，30s/2min 协调兜底
 - 🌐 **WebView2 Preview** — 每个 workspace 一个独立预览窗口，可复用
 - 📸 **截图与诊断** — PNG 截图 + 内存里的 console / network 诊断
@@ -40,9 +41,10 @@ v0.1 覆盖本机这条闭环。LAN / 手机 / 文件编辑还没做。
 
 需要：Windows 10/11、本机已安装 [Herdr](https://herdr.dev)。
 
-1. 打开 [Releases](https://github.com/zxbdzh/herdr-workbench/releases) 下载 `Herdr Workbench_0.1.5_x64-setup.exe`
+1. 打开 [Releases](https://github.com/zxbdzh/herdr-workbench/releases) 下载 `Herdr Workbench_0.2.0_x64-setup.exe`
 2. 安装并启动
 3. 先打开 Herdr，再打开 Workbench；工作区列表会从本机 Herdr 同步
+4. 要给手机或另一台电脑看：在本机点「开启局域网」，记下配对码，另一台设备打开显示的 `http://<局域网IP>:17321/`，输入配对码
 
 开发者也可以直接跑 debug 可执行文件：
 

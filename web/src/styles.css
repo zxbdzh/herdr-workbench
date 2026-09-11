@@ -32,6 +32,12 @@ h2 { margin-bottom: 0; font-size: 24px; }
 .workspace-id { display: block; margin-top: 8px; }
 .preview-state { display: block; margin-top: 8px; color: #55d68a; font: 12px Consolas, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .preview-url { min-width: 180px; flex: 1; max-width: 280px; border: 1px solid #394654; background: #0d1218; color: #e6edf3; padding: 8px 10px; font: 12px Consolas, monospace; }
+.lan-panel { margin: 24px 0; padding: 20px; border: 1px solid #27313d; background: #0d1218; }
+.lan-panel h2 { margin-bottom: 8px; font-size: 20px; }
+.lan-panel p { margin: 0 0 14px; color: #9aa7b5; font-size: 13px; }
+.lan-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.pair-code { font: 700 28px Consolas, monospace; letter-spacing: .18em; color: #55d68a; }
+.lan-urls { margin: 12px 0 0; padding-left: 18px; color: #b9c5d2; font: 13px Consolas, monospace; }
 .preview-button { border: 1px solid #2e8b68; background: transparent; color: #55d68a; padding: 8px 10px; cursor: pointer; font: 12px Consolas, monospace; white-space: nowrap; }
 .preview-button:hover:not(:disabled) { background: #123126; }
 .preview-button:disabled { cursor: wait; opacity: .6; }

@@ -8,6 +8,15 @@ pub struct HealthResponse {
 }
 
 #[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct LanStatusResponse {
+    pub enabled: bool,
+    pub listen: String,
+    pub urls: Vec<String>,
+    pub pairing_code: Option<String>,
+    pub can_manage: bool,
+}
+
+#[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct WorkspaceDto {
     pub workspace_id: String,
     pub herdr_workspace_id: String,
@@ -233,9 +242,9 @@ pub struct ErrorBody {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(health, list_workspaces, get_workspace_state, open_preview, capture_preview_screenshot, get_preview_screenshot, get_preview_diagnostics, send_preview_context, workspace_events),
+    paths(health, lan_status, enable_lan, disable_lan, list_workspaces, get_workspace_state, open_preview, capture_preview_screenshot, get_preview_screenshot, get_preview_diagnostics, send_preview_context, workspace_events),
     components(schemas(
-        HealthResponse, WorkspaceDto, WorkspaceListResponse, PreviewOpenRequest,
+        HealthResponse, LanStatusResponse, WorkspaceDto, WorkspaceListResponse, PreviewOpenRequest,
         PreviewContextSendRequest, PreviewContextSendResponse,
         PreviewStateResponse, PreviewSessionDto, PreviewScreenshotResponse, PreviewDiagnosticDto, PreviewDiagnosticsResponse, WorkspaceEventEnvelope, ErrorResponse, ErrorBody
     )),
@@ -245,6 +254,15 @@ pub struct ApiDoc;
 
 #[utoipa::path(get, path = "/api/v1/health", tag = "system", responses((status = 200, body = HealthResponse)))]
 pub fn health() {}
+
+#[utoipa::path(get, path = "/api/v1/lan", tag = "system", responses((status = 200, body = LanStatusResponse)))]
+pub fn lan_status() {}
+
+#[utoipa::path(post, path = "/api/v1/lan/enable", tag = "system", responses((status = 200, body = LanStatusResponse), (status = 403, body = ErrorResponse)))]
+pub fn enable_lan() {}
+
+#[utoipa::path(post, path = "/api/v1/lan/disable", tag = "system", responses((status = 200, body = LanStatusResponse), (status = 403, body = ErrorResponse)))]
+pub fn disable_lan() {}
 
 #[utoipa::path(get, path = "/api/v1/workspaces", responses((status = 200, body = WorkspaceListResponse)))]
 pub fn list_workspaces() {}

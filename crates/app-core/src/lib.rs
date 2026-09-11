@@ -999,6 +999,137 @@ impl PreviewError {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LanStatus {
+    pub enabled: bool,
+    pub listen: String,
+    pub urls: Vec<String>,
+    pub pairing_code: String,
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+#[error("LAN access denied: {message}")]
+pub struct LanDenied {
+    message: String,
+}
+
+impl LanDenied {
+    pub fn pairing_required() -> Self {
+        Self {
+            message: "pairing code required".into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct LanAccess {
+    enabled: bool,
+    pairing_code: Option<String>,
+    urls: Vec<String>,
+}
+
+impl LanAccess {
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn pairing_code(&self) -> Option<&str> {
+        self.pairing_code.as_deref()
+    }
+
+    pub fn status(&self) -> LanStatus {
+        LanStatus {
+            enabled: self.enabled,
+            listen: if self.enabled {
+                "0.0.0.0:17321".into()
+            } else {
+                "127.0.0.1:17321".into()
+            },
+            urls: self.urls.clone(),
+            pairing_code: self.pairing_code.clone().unwrap_or_default(),
+        }
+    }
+
+    pub fn enable(&mut self, addresses: impl IntoIterator<Item = String>) -> LanStatus {
+        self.enabled = true;
+        self.pairing_code = Some(generate_pairing_code());
+        self.urls = addresses
+            .into_iter()
+            .map(|ip| format!("http://{ip}:17321/"))
+            .collect();
+        self.status()
+    }
+
+    pub fn disable(&mut self) {
+        self.enabled = false;
+        self.pairing_code = None;
+        self.urls.clear();
+    }
+
+    pub fn authorize(&self, peer_ip: &str, pairing_code: Option<&str>) -> Result<(), LanDenied> {
+        if is_loopback(peer_ip) {
+            return Ok(());
+        }
+        if !self.enabled {
+            return Err(LanDenied::pairing_required());
+        }
+        match (self.pairing_code.as_deref(), pairing_code) {
+            (Some(expected), Some(actual)) if expected == actual => Ok(()),
+            _ => Err(LanDenied::pairing_required()),
+        }
+    }
+}
+
+fn is_loopback(peer_ip: &str) -> bool {
+    peer_ip == "127.0.0.1"
+        || peer_ip == "::1"
+        || peer_ip == "localhost"
+        || peer_ip == "::ffff:127.0.0.1"
+}
+
+fn generate_pairing_code() -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    format!("{:06}", rng.gen_range(0..1_000_000))
+}
+
+pub fn lan_ipv4_addresses() -> Vec<String> {
+    use std::collections::BTreeSet;
+    use std::net::{IpAddr, ToSocketAddrs, UdpSocket};
+
+    let mut ips = BTreeSet::new();
+    if let Ok(socket) = UdpSocket::bind("0.0.0.0:0")
+        && socket.connect("1.1.1.1:80").is_ok()
+        && let Ok(addr) = socket.local_addr()
+        && let IpAddr::V4(ip) = addr.ip()
+        && is_advertisable_lan_ip(ip)
+    {
+        ips.insert(ip.to_string());
+    }
+    for host in [
+        std::env::var("COMPUTERNAME").ok(),
+        std::env::var("HOSTNAME").ok(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Ok(addrs) = (host.as_str(), 0u16).to_socket_addrs() {
+            for addr in addrs {
+                if let IpAddr::V4(ip) = addr.ip()
+                    && is_advertisable_lan_ip(ip)
+                {
+                    ips.insert(ip.to_string());
+                }
+            }
+        }
+    }
+    ips.into_iter().collect()
+}
+
+fn is_advertisable_lan_ip(ip: std::net::Ipv4Addr) -> bool {
+    !ip.is_loopback() && !ip.is_unspecified() && !ip.is_link_local() && !ip.is_multicast()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -1009,10 +1140,10 @@ mod tests {
         HerdrAgentInfo, HerdrEventSource, HerdrEventSyncLoop, HerdrHost, HerdrHostError,
         HerdrLifecycleEvent, HerdrPaneInfo, HerdrReconcileLoop, HerdrWorkspaceContext,
         HerdrWorkspaceInfo, InMemoryPreviewDiagnostics, InMemoryPreviewRepository,
-        InMemoryScreenshotStore, InMemoryWorkspaceRepository, OpenPreview, PreviewAdapter,
-        PreviewDiagnosticsSink, PreviewError, PreviewScreenshotRepository, PreviewStateUpdater,
-        PublishingPreviewStateUpdater, ReconcileSleeper, ScreenshotStore, SendPreviewContext,
-        SyncHerdrWorkspaces, WorkspaceRepository,
+        InMemoryScreenshotStore, InMemoryWorkspaceRepository, LanAccess, OpenPreview,
+        PreviewAdapter, PreviewDiagnosticsSink, PreviewError, PreviewScreenshotRepository,
+        PreviewStateUpdater, PublishingPreviewStateUpdater, ReconcileSleeper, ScreenshotStore,
+        SendPreviewContext, SyncHerdrWorkspaces, WorkspaceRepository,
     };
     use async_trait::async_trait;
     use herdr_workbench_domain::{
@@ -2026,5 +2157,41 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, super::ApplicationError::Herdr(_)));
         assert!(prompts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn lan_access_is_off_by_default() {
+        let lan = LanAccess::default();
+        assert!(!lan.enabled());
+        assert!(lan.pairing_code().is_none());
+        assert!(lan.authorize("10.0.0.8", None).is_err());
+        assert!(lan.authorize("127.0.0.1", None).is_ok());
+    }
+
+    #[test]
+    fn enabling_lan_issues_a_pairing_code_required_off_localhost() {
+        let mut lan = LanAccess::default();
+        let enabled = lan.enable(["192.168.1.20".into()]);
+        assert!(enabled.enabled);
+        assert_eq!(enabled.listen, "0.0.0.0:17321");
+        assert!(
+            enabled
+                .urls
+                .iter()
+                .any(|url| url.contains("192.168.1.20:17321"))
+        );
+        assert_eq!(enabled.pairing_code.len(), 6);
+        assert!(lan.authorize("10.0.0.8", None).is_err());
+        assert!(
+            lan.authorize("10.0.0.8", Some(&enabled.pairing_code))
+                .is_ok()
+        );
+        assert!(lan.authorize("127.0.0.1", None).is_ok());
+        lan.disable();
+        assert!(!lan.enabled());
+        assert!(
+            lan.authorize("10.0.0.8", Some(&enabled.pairing_code))
+                .is_err()
+        );
     }
 }

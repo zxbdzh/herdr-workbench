@@ -11,6 +11,7 @@ use herdr_workbench_transport::{AppState, router};
 use thiserror::Error;
 
 pub const DEFAULT_ADDRESS: &str = "127.0.0.1:17321";
+pub const LAN_ADDRESS: &str = "0.0.0.0:17321";
 
 #[derive(Debug, Error)]
 pub enum ServerError {
@@ -151,24 +152,62 @@ where
     A: PreviewAdapter + 'static,
     F: FnOnce() + Send + 'static,
 {
-    let address: SocketAddr = DEFAULT_ADDRESS.parse().expect("valid localhost address");
-    let listener = tokio::net::TcpListener::bind(address)
+    let mut on_ready = Some(on_ready);
+    let (lan_tx, mut lan_rx) = tokio::sync::watch::channel(false);
+    let mut state = AppState::new(
+        Arc::clone(&repository),
+        repository,
+        preview_adapter,
+        events,
+        screenshot_store(),
+        diagnostics,
+        Arc::new(HerdrCliHost::from_env()),
+    );
+    state.lan_bind = Some(lan_tx);
+    let mut announced = false;
+    loop {
+        let lan_enabled = *lan_rx.borrow_and_update();
+        let address: SocketAddr = if lan_enabled {
+            LAN_ADDRESS.parse().expect("valid lan address")
+        } else {
+            DEFAULT_ADDRESS.parse().expect("valid localhost address")
+        };
+        let listener = match tokio::net::TcpListener::bind(address).await {
+            Ok(listener) => listener,
+            Err(error) if lan_enabled => {
+                eprintln!("LAN bind failed, staying on localhost: {error}");
+                {
+                    let mut lan = state
+                        .lan
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    lan.disable();
+                }
+                let _ = state
+                    .lan_bind
+                    .as_ref()
+                    .expect("lan bind channel")
+                    .send(false);
+                continue;
+            }
+            Err(error) => return Err(ServerError::Bind(error)),
+        };
+        println!("herdr-workbench listening on http://{address}");
+        if !announced {
+            if let Some(ready) = on_ready.take() {
+                ready();
+            }
+            announced = true;
+        }
+        let mut shutdown_rx = lan_rx.clone();
+        axum::serve(
+            listener,
+            router(state.clone()).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_rx.changed().await;
+        })
         .await
-        .map_err(ServerError::Bind)?;
-    println!("herdr-workbench listening on http://{address}");
-    on_ready();
-    axum::serve(
-        listener,
-        router(AppState::new(
-            Arc::clone(&repository),
-            repository,
-            preview_adapter,
-            events,
-            screenshot_store(),
-            diagnostics,
-            Arc::new(HerdrCliHost::from_env()),
-        )),
-    )
-    .await
-    .map_err(ServerError::Serve)
+        .map_err(ServerError::Serve)?;
+    }
 }
