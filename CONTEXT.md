@@ -2,7 +2,7 @@
 
 ## 项目定位
 
-Herdr Workbench 是一个 Windows-first 的 Herdr 远程工作台。Windows 主机承载浏览器预览、文件访问、页面诊断和远程 API；Herdr 负责工作区与 Agent 上下文；远程电脑和手机通过 Web 客户端访问。
+Herdr Workbench 是一个 Windows-first 的 Herdr 远程工作台。Windows 主机承载工作区、Agent 会话、浏览器预览、文件访问和远程 API；Herdr 负责工作区与 Agent 上下文；远程电脑和手机通过同一套 Web 客户端**使用** Herdr，而不是盯着一个控制台。
 
 ## 核心概念
 
@@ -28,13 +28,10 @@ Herdr Workbench 是一个 Windows-first 的 Herdr 远程工作台。Windows 主�
 
 ```text
 Windows Herdr
-→ 启动本地 dev server
-→ Workbench 打开 WebView2 预览
-→ 采集真实页面状态
-→ 本机/远程电脑/手机查看
-→ 将截图与诊断发送给 Agent
-→ Agent 修复
-→ 预览刷新
+→ Workbench 绑定工作区
+→ 本机/远程电脑/手机进入工作区
+→ 查看 Agent 输出并回复 / 批准
+→ Preview 与文件作为配套能力
 ```
 
 ## 文档维护

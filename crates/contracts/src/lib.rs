@@ -229,6 +229,38 @@ impl WorkspaceEventEnvelope {
 }
 
 #[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct AgentDto {
+    pub pane_id: String,
+    pub agent: String,
+    pub status: String,
+    pub focused: bool,
+}
+
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct AgentListResponse {
+    pub agents: Vec<AgentDto>,
+}
+
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct AgentSessionResponse {
+    pub pane_id: String,
+    pub agent: String,
+    pub status: String,
+    pub focused: bool,
+    pub transcript: String,
+}
+
+#[derive(Clone, Debug, Deserialize, ToSchema, Default)]
+pub struct AgentPromptRequest {
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+pub struct AgentApproveRequest {
+    pub decision: String,
+}
+
+#[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct ErrorResponse {
     pub error: ErrorBody,
 }
@@ -242,11 +274,11 @@ pub struct ErrorBody {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(health, lan_status, enable_lan, disable_lan, list_workspaces, get_workspace_state, open_preview, capture_preview_screenshot, get_preview_screenshot, get_preview_diagnostics, send_preview_context, workspace_events),
+    paths(health, lan_status, enable_lan, disable_lan, list_workspaces, get_workspace_state, open_preview, capture_preview_screenshot, get_preview_screenshot, get_preview_diagnostics, send_preview_context, list_workspace_agents, get_workspace_agent, prompt_workspace_agent, approve_workspace_agent, workspace_events),
     components(schemas(
         HealthResponse, LanStatusResponse, WorkspaceDto, WorkspaceListResponse, PreviewOpenRequest,
         PreviewContextSendRequest, PreviewContextSendResponse,
-        PreviewStateResponse, PreviewSessionDto, PreviewScreenshotResponse, PreviewDiagnosticDto, PreviewDiagnosticsResponse, WorkspaceEventEnvelope, ErrorResponse, ErrorBody
+        PreviewStateResponse, PreviewSessionDto, PreviewScreenshotResponse, PreviewDiagnosticDto, PreviewDiagnosticsResponse, AgentDto, AgentListResponse, AgentSessionResponse, AgentPromptRequest, AgentApproveRequest, WorkspaceEventEnvelope, ErrorResponse, ErrorBody
     )),
     tags((name = "system", description = "Workbench system endpoints"))
 )]
@@ -316,6 +348,40 @@ pub fn get_preview_diagnostics() {}
     responses((status = 200, body = PreviewContextSendResponse), (status = 404, body = ErrorResponse), (status = 503, body = ErrorResponse))
 )]
 pub fn send_preview_context() {}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{id}/agents",
+    params(("id" = String, Path, description = "Workbench workspace ID")),
+    responses((status = 200, body = AgentListResponse), (status = 404, body = ErrorResponse), (status = 503, body = ErrorResponse))
+)]
+pub fn list_workspace_agents() {}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{id}/agents/{pane_id}",
+    params(("id" = String, Path, description = "Workbench workspace ID"), ("pane_id" = String, Path, description = "Herdr pane ID")),
+    responses((status = 200, body = AgentSessionResponse), (status = 404, body = ErrorResponse), (status = 503, body = ErrorResponse))
+)]
+pub fn get_workspace_agent() {}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{id}/agents/{pane_id}/prompt",
+    params(("id" = String, Path, description = "Workbench workspace ID"), ("pane_id" = String, Path, description = "Herdr pane ID")),
+    request_body = AgentPromptRequest,
+    responses((status = 200, body = AgentSessionResponse), (status = 404, body = ErrorResponse), (status = 503, body = ErrorResponse))
+)]
+pub fn prompt_workspace_agent() {}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{id}/agents/{pane_id}/approve",
+    params(("id" = String, Path, description = "Workbench workspace ID"), ("pane_id" = String, Path, description = "Herdr pane ID")),
+    request_body = AgentApproveRequest,
+    responses((status = 200, body = AgentSessionResponse), (status = 404, body = ErrorResponse), (status = 503, body = ErrorResponse))
+)]
+pub fn approve_workspace_agent() {}
 
 #[utoipa::path(
     get,

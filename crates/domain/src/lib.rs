@@ -126,4 +126,10 @@ pub enum DomainError {
     WorkspaceRootContainsTraversal,
     #[error("UNC workspace roots are not allowed")]
     UncWorkspaceRootNotAllowed,
+    #[error("approval decision must be yes or no")]
+    InvalidAgentDecision,
+    #[error("agent is blocked; approve or reject it before sending a prompt")]
+    AgentBlockedForPrompt,
+    #[error("agent is not blocked; send a prompt instead of an approval")]
+    AgentNotBlockedForApproval,
 }
