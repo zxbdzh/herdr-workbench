@@ -509,7 +509,7 @@ function App() {
           )}
         </section>
       )}
-      <footer><span>Herdr Workbench 0.3</span><span>{lan?.enabled ? "LAN · same UI" : "localhost · Windows-first"}</span></footer>
+      <footer><span>Herdr Workbench 0.3.1</span><span>{lan?.enabled ? "LAN · same UI" : "localhost · Windows-first"}</span></footer>
     </main>
   );
 }
