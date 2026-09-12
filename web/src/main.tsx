@@ -107,6 +107,7 @@ function App() {
   const [selectedPane, setSelectedPane] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  const [showTools, setShowTools] = useState(false);
 
   const active = workspaces?.find((workspace) => workspace.workspace_id === activeId) ?? null;
 
@@ -405,7 +406,7 @@ function App() {
           </div>
         </section>
       )}
-      {lan && (
+      {!active && lan && (
         <section className="lan-panel">
           <p className="eyebrow">LAN ACCESS</p>
           <h2>{lan.enabled ? "局域网已开启" : "默认只听本机"}</h2>
@@ -454,7 +455,10 @@ function App() {
               <h2>{active.label}</h2>
               <code>{active.cwd}</code>
             </div>
-            <button className="preview-button" type="button" onClick={() => setActiveId(null)}>返回工作区列表</button>
+            <div className="lan-row">
+              <button className="preview-button" type="button" onClick={() => setShowTools((current) => !current)}>{showTools ? "收起 Preview" : "Preview"}</button>
+              <button className="preview-button" type="button" onClick={() => setActiveId(null)}>返回工作区列表</button>
+            </div>
           </div>
           {agents.length === 0 && <div className="empty"><strong>这个工作区还没有 Agent</strong><p>在本机 Herdr 里打开一个 Agent pane 后再回来。</p></div>}
           {agents.length > 0 && (
@@ -487,6 +491,7 @@ function App() {
               )}
             </>
           )}
+          {showTools && (
           <div className="session-tools">
             <p className="eyebrow">HOST TOOLS</p>
             <p>Preview、截图和诊断还在，但不是这一刀的使用面。</p>
@@ -501,6 +506,7 @@ function App() {
             {sent[active.workspace_id] && <span className="preview-state">{sent[active.workspace_id]}</span>}
             {diagnostics[active.workspace_id]?.length ? <ul className="preview-diagnostics">{diagnostics[active.workspace_id].map((item, index) => <li key={`${item.occurred_at}-${index}`}>{item.level} · {item.kind} · {item.message}</li>)}</ul> : null}
           </div>
+          )}
         </section>
       )}
       <footer><span>Herdr Workbench 0.3</span><span>{lan?.enabled ? "LAN · same UI" : "localhost · Windows-first"}</span></footer>
