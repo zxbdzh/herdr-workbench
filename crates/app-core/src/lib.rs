@@ -737,6 +737,22 @@ pub fn agent_is_blocked(status: &str) -> bool {
     status.eq_ignore_ascii_case("blocked")
 }
 
+pub fn strip_agent_transcript(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let Some(index) = trimmed.find('\u{2500}') else {
+        return trimmed.to_owned();
+    };
+    let stripped = trimmed[..index].trim_end();
+    if stripped.is_empty() {
+        trimmed.to_owned()
+    } else {
+        stripped.to_owned()
+    }
+}
+
 fn workspace_agents<'a>(
     herdr_workspace_id: &str,
     agents: &'a [HerdrAgentInfo],
@@ -809,7 +825,7 @@ where
         let agents = self.agents.list_agents().await?;
         let selected =
             find_workspace_agent(workspace.herdr_workspace_id.as_str(), pane_id, &agents)?;
-        let transcript = self.agents.read_agent(&selected.pane_id).await?;
+        let transcript = strip_agent_transcript(&self.agents.read_agent(&selected.pane_id).await?);
         Ok(WorkspaceAgentSession {
             pane_id: selected.pane_id.clone(),
             agent: selected.agent.clone(),
@@ -2490,6 +2506,26 @@ mod tests {
         assert_eq!(session.agent, "pi");
         assert_eq!(session.status, "idle");
         assert_eq!(session.transcript, "please approve the install");
+    }
+
+    #[test]
+    fn stripping_agent_transcript_drops_the_tui_footer() {
+        let raw = "please approve the install\n\
+\n\
+────────────────────────────────────────────────────────────────\n\
+\n\
+ grok-4.6  Sylorapi Copy 2  xhigh\n\
+────────────────────────────────────────────────────────────────\n\
+ Huajingflow in demo on * feat/demo\n\
+ [####------] 41.3%/500k (auto) | $0.000\n";
+        assert_eq!(
+            super::strip_agent_transcript(raw),
+            "please approve the install"
+        );
+        assert_eq!(
+            super::strip_agent_transcript("please approve the install"),
+            "please approve the install"
+        );
     }
 
     #[tokio::test]

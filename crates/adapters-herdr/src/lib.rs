@@ -103,17 +103,22 @@ pub fn parse_pane_list(stdout: &str) -> Result<Vec<HerdrPaneInfo>, HerdrHostErro
         .collect())
 }
 
+pub fn windows_herdr_creation_flags() -> u32 {
+    0x0800_0000
+}
+
 async fn run_herdr(binary: &Path, args: &[&str]) -> Result<String, HerdrHostError> {
-    let output = Command::new(binary)
+    let mut command = Command::new(binary);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .map_err(|error| {
-            HerdrHostError::unavailable(format!("failed to spawn {}: {error}", binary.display()))
-        })?;
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    command.creation_flags(windows_herdr_creation_flags());
+    let output = command.output().await.map_err(|error| {
+        HerdrHostError::unavailable(format!("failed to spawn {}: {error}", binary.display()))
+    })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(HerdrHostError::unavailable(format!(
@@ -386,7 +391,8 @@ impl HerdrEventSource for HerdrNamedPipeEventSource {
 mod tests {
     use super::{
         agent_read_args, agent_send_keys_args, parse_agent_list, parse_lifecycle_event,
-        parse_pane_list, parse_subscription_ack, parse_workspace_list, windows_named_pipe_path,
+        parse_pane_list, parse_subscription_ack, parse_workspace_list,
+        windows_herdr_creation_flags, windows_named_pipe_path,
     };
     use herdr_workbench_app_core::HerdrLifecycleEvent;
     use std::path::{Path, PathBuf};
@@ -501,5 +507,10 @@ mod tests {
             agent_send_keys_args("wD:p3M", &["n", "enter"]),
             vec!["agent", "send-keys", "wD:p3M", "n", "enter"]
         );
+    }
+
+    #[test]
+    fn windows_herdr_spawn_hides_the_console() {
+        assert_eq!(windows_herdr_creation_flags(), 0x0800_0000);
     }
 }

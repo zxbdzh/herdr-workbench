@@ -41,7 +41,7 @@ v0.3 ships the workspace agent session. Preview and screenshots still exist, but
 
 Requires Windows 10/11 and [Herdr](https://herdr.dev) on the same machine.
 
-1. Download `Herdr Workbench_0.3.0_x64-setup.exe` from [Releases](https://github.com/zxbdzh/herdr-workbench/releases)
+1. Download `Herdr Workbench_0.3.1_x64-setup.exe` from [Releases](https://github.com/zxbdzh/herdr-workbench/releases)
 2. Install and launch
 3. Start Herdr first, then Workbench; the workspace list syncs from local Herdr
 4. For a phone or another computer: enable LAN on the host, note the pairing code, open `http://<lan-ip>:17321/`, enter the code, then open a workspace

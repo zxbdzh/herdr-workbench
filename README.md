@@ -41,7 +41,7 @@ v0.3 先交付工作区 + Agent 对话/批准。Preview / 截图仍可用，但�
 
 需要：Windows 10/11、本机已安装 [Herdr](https://herdr.dev)。
 
-1. 打开 [Releases](https://github.com/zxbdzh/herdr-workbench/releases) 下载 `Herdr Workbench_0.3.0_x64-setup.exe`
+1. 打开 [Releases](https://github.com/zxbdzh/herdr-workbench/releases) 下载 `Herdr Workbench_0.3.1_x64-setup.exe`
 2. 安装并启动
 3. 先打开 Herdr，再打开 Workbench；工作区列表会从本机 Herdr 同步
 4. 要给手机或另一台电脑用：在本机点「开启局域网」，记下配对码，另一台设备打开显示的 `http://<局域网IP>:17321/`，输入配对码，再点进工作区
