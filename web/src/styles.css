@@ -13,7 +13,7 @@ html, body, #root { margin: 0; height: 100%; background: #080b10; }
 }
 .map-touch { border-bottom: 0; border-top: 1px solid #27313d; }
 .map-lan.collapsed, .map-touch.collapsed { padding: 4px 12px; }
-.herdr-term { flex: 1; min-height: 0; padding: 8px; touch-action: none; overscroll-behavior: none; }
+.herdr-term { flex: 1; min-height: 0; padding: 0; overflow: hidden; touch-action: none; overscroll-behavior: none; }
 .herdr-term .xterm, .herdr-term .xterm-viewport { height: 100%; }
 .eyebrow { margin: 0 0 10px; color: #7d8a99; font: 600 11px/1.2 Consolas, monospace; letter-spacing: .08em; }
 h2, p { margin-top: 0; }

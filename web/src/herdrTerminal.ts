@@ -37,6 +37,8 @@ export const createHerdrTerminal = (host: HTMLElement) => {
     windowsMode: true,
     fontFamily: "Consolas, 'Cascadia Mono', monospace",
     fontSize: 14,
+    letterSpacing: 0,
+    lineHeight: 1,
     theme: { background: "#080b10", foreground: "#e6edf3", cursor: "#55d68a" },
     scrollback: 0,
   });

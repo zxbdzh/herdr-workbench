@@ -80,6 +80,7 @@ function App() {
     const session = attachHerdrSocket(hostRef.current, terminal, fit, setStatus);
     sessionRef.current = session;
     const onVisual = () => {
+      if (!touch) return;
       const viewport = window.visualViewport;
       if (!viewport || !hostRef.current) return;
       hostRef.current.style.height = `${Math.max(120, viewport.height - 88)}px`;
