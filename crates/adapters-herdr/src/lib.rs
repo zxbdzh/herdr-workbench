@@ -112,6 +112,42 @@ pub fn herdr_client_attach_args() -> Vec<String> {
     Vec::new()
 }
 
+pub fn mapped_herdr_client_config() -> &'static str {
+    concat!(
+        "onboarding = false\n",
+        "[terminal]\n",
+        "kitty_graphics = false\n",
+        "[ui]\n",
+        "redraw_on_focus_gained = false\n",
+    )
+}
+
+pub fn mapped_herdr_client_config_path() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("HerdrWorkbench")
+        .join("mapped-herdr-client.toml")
+}
+
+pub fn write_mapped_herdr_client_config(path: &Path) -> Result<PathBuf, HerdrHostError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            HerdrHostError::unavailable(format!(
+                "failed to create mapped Herdr config dir {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+    std::fs::write(path, mapped_herdr_client_config()).map_err(|error| {
+        HerdrHostError::unavailable(format!(
+            "failed to write mapped Herdr config {}: {error}",
+            path.display()
+        ))
+    })?;
+    Ok(path.to_path_buf())
+}
+
 async fn run_herdr(binary: &Path, args: &[&str]) -> Result<String, HerdrHostError> {
     let mut command = Command::new(binary);
     command
@@ -321,6 +357,8 @@ impl HerdrClientFactory for PtyHerdrClientFactory {
             }
             command.env("TERM", "xterm-256color");
             command.env("COLORTERM", "truecolor");
+            let config_path = write_mapped_herdr_client_config(&mapped_herdr_client_config_path())?;
+            command.env("HERDR_CONFIG_PATH", config_path.as_os_str());
             let child = pair.slave.spawn_command(command).map_err(|error| {
                 HerdrHostError::unavailable(format!(
                     "failed to spawn {} in ConPTY: {error}",
@@ -527,9 +565,10 @@ impl HerdrEventSource for HerdrNamedPipeEventSource {
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_read_args, agent_send_keys_args, herdr_client_attach_args, parse_agent_list,
-        parse_lifecycle_event, parse_pane_list, parse_subscription_ack, parse_workspace_list,
-        windows_herdr_creation_flags, windows_named_pipe_path,
+        agent_read_args, agent_send_keys_args, herdr_client_attach_args,
+        mapped_herdr_client_config, parse_agent_list, parse_lifecycle_event, parse_pane_list,
+        parse_subscription_ack, parse_workspace_list, windows_herdr_creation_flags,
+        windows_named_pipe_path,
     };
     use herdr_workbench_app_core::HerdrLifecycleEvent;
     use std::path::{Path, PathBuf};
@@ -654,5 +693,32 @@ mod tests {
     #[test]
     fn herdr_client_attach_runs_herdr_with_no_extra_args() {
         assert!(herdr_client_attach_args().is_empty());
+    }
+
+    #[test]
+    fn mapped_herdr_client_config_disables_kitty_graphics() {
+        let config = mapped_herdr_client_config();
+        assert!(config.contains("kitty_graphics = false"));
+        assert!(config.contains("redraw_on_focus_gained = false"));
+        assert!(!config.contains("kitty_graphics = true"));
+    }
+
+    #[test]
+    fn write_mapped_herdr_client_config_does_not_touch_user_herdr_config() {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-workbench-mapped-config-{}",
+            std::process::id()
+        ));
+        let path = dir.join("mapped-herdr-client.toml");
+        let written = super::write_mapped_herdr_client_config(&path).unwrap();
+        let body = std::fs::read_to_string(&written).unwrap();
+        assert_eq!(body, mapped_herdr_client_config());
+        assert!(
+            !written
+                .to_string_lossy()
+                .replace('\\', "/")
+                .contains("/herdr/config.toml")
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
