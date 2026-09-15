@@ -7,7 +7,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{
-        Path, State,
+        Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderValue, Request, StatusCode, header::CONTENT_TYPE},
@@ -20,7 +20,8 @@ use herdr_workbench_app_core::{
     HerdrClientHub, LanAccess, LanDenied, LanStatus, ListWorkspaceAgents, OpenPreview,
     PreviewAdapter, PreviewDiagnosticsSink, PreviewError, PreviewScreenshotRepository,
     PreviewTransactionRepository, PromptWorkspaceAgent, ReadWorkspaceAgent, ScreenshotStore,
-    SendPreviewContext, UnavailableAgentBridge, WorkspaceRepository, lan_ipv4_addresses,
+    SendPreviewContext, UnavailableAgentBridge, WorkspaceRepository, herdr_client_attach_size,
+    lan_ipv4_addresses,
 };
 use herdr_workbench_contracts::{
     AgentApproveRequest, AgentDto, AgentListResponse, AgentPromptRequest, AgentSessionResponse,
@@ -30,6 +31,7 @@ use herdr_workbench_contracts::{
     WorkspaceListResponse,
 };
 use rust_embed::RustEmbed;
+use serde::Deserialize;
 use utoipa::OpenApi;
 
 #[derive(RustEmbed)]
@@ -707,8 +709,15 @@ where
     )
 }
 
+#[derive(Deserialize)]
+struct HerdrClientQuery {
+    cols: Option<u16>,
+    rows: Option<u16>,
+}
+
 async fn herdr_client<W, P, A, S>(
     State(state): State<AppState<W, P, A, S>>,
+    Query(query): Query<HerdrClientQuery>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiError>
 where
@@ -718,11 +727,12 @@ where
     S: ScreenshotStore + 'static,
 {
     let hub = Arc::clone(&state.herdr_clients);
-    Ok(ws.on_upgrade(move |socket| drive_herdr_client(socket, hub)))
+    let (cols, rows) = herdr_client_attach_size(query.cols, query.rows);
+    Ok(ws.on_upgrade(move |socket| drive_herdr_client(socket, hub, cols, rows)))
 }
 
-async fn drive_herdr_client(mut socket: WebSocket, hub: Arc<HerdrClientHub>) {
-    let id = match hub.attach(80, 24).await {
+async fn drive_herdr_client(mut socket: WebSocket, hub: Arc<HerdrClientHub>, cols: u16, rows: u16) {
+    let id = match hub.attach(cols, rows).await {
         Ok(id) => id,
         Err(_) => {
             let _ = socket.send(Message::Close(None)).await;
