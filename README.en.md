@@ -38,7 +38,7 @@ v0.4 ships that mapping. Embedded browser and file browsing are not in this rele
 
 Requires Windows 10/11 and [Herdr](https://herdr.dev) on the same machine.
 
-1. Download `Herdr Workbench_0.4.4_x64-setup.exe` from [Releases](https://github.com/zxbdzh/herdr-workbench/releases)
+1. Download `Herdr Workbench_0.4.5_x64-setup.exe` from [Releases](https://github.com/zxbdzh/herdr-workbench/releases)
 2. Install and launch
 3. Opening Workbench attaches Herdr. If no server is up, the first client starts it
 4. For a phone or another computer: enable LAN on the host, note the pairing code, open `http://<lan-ip>:17321/`, enter the code
