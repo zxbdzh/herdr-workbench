@@ -5,8 +5,9 @@ use std::{
 
 use async_trait::async_trait;
 use herdr_workbench_app_core::{
-    AGENT_TRANSCRIPT_LINES, HerdrAgentBridge, HerdrAgentInfo, HerdrEventSource, HerdrHost,
-    HerdrHostError, HerdrLifecycleEvent, HerdrPaneInfo, HerdrWorkspaceInfo,
+    AGENT_TRANSCRIPT_LINES, HerdrAgentBridge, HerdrAgentInfo, HerdrClientFactory,
+    HerdrClientSession, HerdrEventSource, HerdrHost, HerdrHostError, HerdrLifecycleEvent,
+    HerdrPaneInfo, HerdrWorkspaceInfo,
 };
 use serde::Deserialize;
 use tokio::process::Command;
@@ -105,6 +106,10 @@ pub fn parse_pane_list(stdout: &str) -> Result<Vec<HerdrPaneInfo>, HerdrHostErro
 
 pub fn windows_herdr_creation_flags() -> u32 {
     0x0800_0000
+}
+
+pub fn herdr_client_attach_args() -> Vec<String> {
+    Vec::new()
 }
 
 async fn run_herdr(binary: &Path, args: &[&str]) -> Result<String, HerdrHostError> {
@@ -222,6 +227,138 @@ impl HerdrAgentBridge for HerdrCliHost {
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         let _ = run_herdr(&self.binary, &argv).await?;
         Ok(())
+    }
+}
+
+pub struct PtyHerdrClientFactory {
+    binary: PathBuf,
+}
+
+impl PtyHerdrClientFactory {
+    pub fn from_env() -> Self {
+        Self {
+            binary: std::env::var_os("HERDR_BIN_PATH")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("herdr")),
+        }
+    }
+}
+
+struct PtyHerdrClientSession {
+    writer: std::sync::Mutex<Box<dyn std::io::Write + Send>>,
+    master: std::sync::Mutex<Box<dyn portable_pty::MasterPty + Send>>,
+    output: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Vec<u8>>>,
+    child: std::sync::Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
+}
+
+#[async_trait]
+impl HerdrClientSession for PtyHerdrClientSession {
+    async fn write(&self, bytes: &[u8]) -> Result<(), HerdrHostError> {
+        let bytes = bytes.to_vec();
+        let mut writer = self
+            .writer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        use std::io::Write;
+        writer
+            .write_all(&bytes)
+            .and_then(|_| writer.flush())
+            .map_err(|error| {
+                HerdrHostError::unavailable(format!("herdr client write failed: {error}"))
+            })
+    }
+
+    async fn resize(&self, cols: u16, rows: u16) -> Result<(), HerdrHostError> {
+        self.master
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .resize(portable_pty::PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|error| {
+                HerdrHostError::unavailable(format!("herdr client resize failed: {error}"))
+            })
+    }
+
+    async fn read(&self) -> Result<Option<Vec<u8>>, HerdrHostError> {
+        Ok(self.output.lock().await.recv().await)
+    }
+
+    async fn close(&self) -> Result<(), HerdrHostError> {
+        let mut child = self.child.lock().unwrap_or_else(|error| error.into_inner());
+        let _ = child.kill();
+        let _ = child.wait();
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl HerdrClientFactory for PtyHerdrClientFactory {
+    async fn attach(
+        &self,
+        cols: u16,
+        rows: u16,
+    ) -> Result<std::sync::Arc<dyn HerdrClientSession>, HerdrHostError> {
+        let binary = self.binary.clone();
+        tokio::task::spawn_blocking(move || {
+            let system = portable_pty::native_pty_system();
+            let pair = system
+                .openpty(portable_pty::PtySize {
+                    rows,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .map_err(|error| {
+                    HerdrHostError::unavailable(format!("failed to open ConPTY: {error}"))
+                })?;
+            let mut command = portable_pty::CommandBuilder::new(&binary);
+            for arg in herdr_client_attach_args() {
+                command.arg(arg);
+            }
+            command.env("TERM", "xterm-256color");
+            command.env("COLORTERM", "truecolor");
+            let child = pair.slave.spawn_command(command).map_err(|error| {
+                HerdrHostError::unavailable(format!(
+                    "failed to spawn {} in ConPTY: {error}",
+                    binary.display()
+                ))
+            })?;
+            let mut reader = pair.master.try_clone_reader().map_err(|error| {
+                HerdrHostError::unavailable(format!("failed to clone ConPTY reader: {error}"))
+            })?;
+            let writer = pair.master.take_writer().map_err(|error| {
+                HerdrHostError::unavailable(format!("failed to take ConPTY writer: {error}"))
+            })?;
+            let (tx, rx) = tokio::sync::mpsc::channel(32);
+            std::thread::spawn(move || {
+                use std::io::Read;
+                let mut buffer = [0_u8; 8192];
+                loop {
+                    match reader.read(&mut buffer) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if tx.blocking_send(buffer[..n].to_vec()).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+            Ok(std::sync::Arc::new(PtyHerdrClientSession {
+                writer: std::sync::Mutex::new(writer),
+                master: std::sync::Mutex::new(pair.master),
+                output: tokio::sync::Mutex::new(rx),
+                child: std::sync::Mutex::new(child),
+            }) as std::sync::Arc<dyn HerdrClientSession>)
+        })
+        .await
+        .map_err(|error| {
+            HerdrHostError::unavailable(format!("ConPTY attach task failed: {error}"))
+        })?
     }
 }
 
@@ -390,8 +527,8 @@ impl HerdrEventSource for HerdrNamedPipeEventSource {
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_read_args, agent_send_keys_args, parse_agent_list, parse_lifecycle_event,
-        parse_pane_list, parse_subscription_ack, parse_workspace_list,
+        agent_read_args, agent_send_keys_args, herdr_client_attach_args, parse_agent_list,
+        parse_lifecycle_event, parse_pane_list, parse_subscription_ack, parse_workspace_list,
         windows_herdr_creation_flags, windows_named_pipe_path,
     };
     use herdr_workbench_app_core::HerdrLifecycleEvent;
@@ -512,5 +649,10 @@ mod tests {
     #[test]
     fn windows_herdr_spawn_hides_the_console() {
         assert_eq!(windows_herdr_creation_flags(), 0x0800_0000);
+    }
+
+    #[test]
+    fn herdr_client_attach_runs_herdr_with_no_extra_args() {
+        assert!(herdr_client_attach_args().is_empty());
     }
 }
