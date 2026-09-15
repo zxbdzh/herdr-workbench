@@ -41,6 +41,7 @@ export const createHerdrTerminal = (host: HTMLElement) => {
     lineHeight: 1,
     theme: { background: "#080b10", foreground: "#e6edf3", cursor: "#55d68a" },
     scrollback: 0,
+    overviewRulerWidth: 0,
   });
   const fit = new FitAddon();
   terminal.loadAddon(fit);
