@@ -6,7 +6,7 @@
 
 [中文](README.md)
 
-**Use the same Web UI to work a local Herdr workspace remotely.** Enter a workspace, read the agent, reply, and approve or reject when it is blocked. Windows-first, no terminal, not remote desktop.
+**Map the terminal Herdr session onto the local window, another computer, and a phone.** The page *is* Herdr: click, drag, type. Windows-first, a Herdr satellite, not a second workspace product.
 
 <sub>// Windows-first · Herdr · WebView2 · Browser-to-Agent</sub>
 
@@ -23,28 +23,25 @@
 
 ## What it solves
 
-A coding agent runs inside Herdr on Windows, but a remote computer or phone is stuck watching a terminal — or a Preview dashboard. Herdr Workbench binds Herdr workspaces on Windows and exposes the same usage surface locally, on another computer, and on a phone: enter a workspace, read recent agent output, reply, and approve or reject when the agent is blocked.
+A coding agent runs inside Herdr on Windows. Workbench is a thin outer terminal around a real Herdr client. The same page on the host, another computer, or a phone can click, drag, and type. Workspaces, tabs, splits, and right-click stay Herdr’s.
 
-v0.3 ships the workspace agent session. Preview and screenshots still exist, but they are not the product of this slice. File browsing is not in this release.
+v0.4 ships that mapping. Embedded browser and file browsing are not in this release.
 
 ## Features
 
-- 🤖 **Use Herdr remotely** — enter a workspace, read the agent, reply; approve/reject when `blocked`
+- 🖥️ **Mapped Herdr** — the page is the live Herdr TUI
 - 🖥️ **Windows host** — one Tauri process embeds Axum and listens on `127.0.0.1:17321` by default
-- 📱 **Same UI on LAN** — enable LAN on the host to listen on `0.0.0.0:17321`; another computer or phone enters the pairing code and uses the same workspace
-- 🔗 **Herdr binding** — syncs workspaces from the Herdr CLI on startup; Named Pipe events rebind immediately, with a 30s/2min reconcile fallback
-- 🌐 **WebView2 preview** — one reusable preview window per workspace
-- 📸 **Screenshot and diagnostics** — PNG screenshots plus in-memory console / network diagnostics
-- 📡 **Live state** — workspace-room WebSocket; after disconnect, Query `/state` and reconnect in 1s
+- 📱 **Same UI on LAN** — enable LAN on the host to listen on `0.0.0.0:17321`; another computer or phone enters the pairing code and is in Herdr
+- 🔗 **One client per connection** — each page gets its own ConPTY; closing detaches that client only
 
 ## Install
 
 Requires Windows 10/11 and [Herdr](https://herdr.dev) on the same machine.
 
-1. Download `Herdr Workbench_0.3.1_x64-setup.exe` from [Releases](https://github.com/zxbdzh/herdr-workbench/releases)
+1. Download `Herdr Workbench_0.4.0_x64-setup.exe` from [Releases](https://github.com/zxbdzh/herdr-workbench/releases)
 2. Install and launch
-3. Start Herdr first, then Workbench; the workspace list syncs from local Herdr
-4. For a phone or another computer: enable LAN on the host, note the pairing code, open `http://<lan-ip>:17321/`, enter the code, then open a workspace
+3. Opening Workbench attaches Herdr. If no server is up, the first client starts it
+4. For a phone or another computer: enable LAN on the host, note the pairing code, open `http://<lan-ip>:17321/`, enter the code
 
 Developers can also run the debug executable:
 

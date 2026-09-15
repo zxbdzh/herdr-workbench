@@ -16,11 +16,11 @@ use axum::{
     routing::{get, post},
 };
 use herdr_workbench_app_core::{
-    AgentDecision, ApproveWorkspaceAgent, CapturePreview, EventBus, HerdrAgentBridge, LanAccess,
-    LanDenied, LanStatus, ListWorkspaceAgents, OpenPreview, PreviewAdapter, PreviewDiagnosticsSink,
-    PreviewError, PreviewScreenshotRepository, PreviewTransactionRepository, PromptWorkspaceAgent,
-    ReadWorkspaceAgent, ScreenshotStore, SendPreviewContext, UnavailableAgentBridge,
-    WorkspaceRepository, lan_ipv4_addresses,
+    AgentDecision, ApproveWorkspaceAgent, CapturePreview, EventBus, HerdrAgentBridge,
+    HerdrClientHub, LanAccess, LanDenied, LanStatus, ListWorkspaceAgents, OpenPreview,
+    PreviewAdapter, PreviewDiagnosticsSink, PreviewError, PreviewScreenshotRepository,
+    PreviewTransactionRepository, PromptWorkspaceAgent, ReadWorkspaceAgent, ScreenshotStore,
+    SendPreviewContext, UnavailableAgentBridge, WorkspaceRepository, lan_ipv4_addresses,
 };
 use herdr_workbench_contracts::{
     AgentApproveRequest, AgentDto, AgentListResponse, AgentPromptRequest, AgentSessionResponse,
@@ -44,6 +44,7 @@ pub struct AppState<W, P, A, S> {
     pub screenshots: Arc<S>,
     pub diagnostics: Arc<dyn PreviewDiagnosticsSink>,
     pub agents: Arc<dyn HerdrAgentBridge>,
+    pub herdr_clients: Arc<HerdrClientHub>,
     pub lan: Arc<Mutex<LanAccess>>,
     pub lan_bind: Option<tokio::sync::watch::Sender<bool>>,
 }
@@ -58,6 +59,7 @@ impl<W, P, A, S> Clone for AppState<W, P, A, S> {
             screenshots: Arc::clone(&self.screenshots),
             diagnostics: Arc::clone(&self.diagnostics),
             agents: Arc::clone(&self.agents),
+            herdr_clients: Arc::clone(&self.herdr_clients),
             lan: Arc::clone(&self.lan),
             lan_bind: self.lan_bind.clone(),
         }
@@ -82,6 +84,7 @@ impl<W, P, A, S> AppState<W, P, A, S> {
             screenshots,
             diagnostics,
             agents,
+            herdr_clients: Arc::new(HerdrClientHub::unavailable()),
             lan: Arc::new(Mutex::new(LanAccess::default())),
             lan_bind: None,
         }
@@ -144,6 +147,7 @@ where
             "/ws/v1/workspaces/{id}",
             get(workspace_events::<W, P, A, S>),
         )
+        .route("/ws/v1/herdr", get(herdr_client::<W, P, A, S>))
         .route("/api/v1/lan", get(get_lan::<W, P, A, S>))
         .route("/api/v1/lan/enable", post(enable_lan::<W, P, A, S>))
         .route("/api/v1/lan/disable", post(disable_lan::<W, P, A, S>))
@@ -703,6 +707,73 @@ where
     )
 }
 
+async fn herdr_client<W, P, A, S>(
+    State(state): State<AppState<W, P, A, S>>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, ApiError>
+where
+    W: WorkspaceRepository + 'static,
+    P: PreviewTransactionRepository + PreviewScreenshotRepository + 'static,
+    A: PreviewAdapter + 'static,
+    S: ScreenshotStore + 'static,
+{
+    let hub = Arc::clone(&state.herdr_clients);
+    Ok(ws.on_upgrade(move |socket| drive_herdr_client(socket, hub)))
+}
+
+async fn drive_herdr_client(mut socket: WebSocket, hub: Arc<HerdrClientHub>) {
+    let id = match hub.attach(80, 24).await {
+        Ok(id) => id,
+        Err(_) => {
+            let _ = socket.send(Message::Close(None)).await;
+            return;
+        }
+    };
+    loop {
+        tokio::select! {
+            incoming = socket.recv() => {
+                match incoming {
+                    Some(Ok(Message::Binary(bytes))) => {
+                        if hub.write(id, &bytes).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Text(text))) => {
+                        if let Ok(control) = serde_json::from_str::<serde_json::Value>(&text)
+                            && control["type"] == "resize"
+                        {
+                            let cols = control["cols"].as_u64().unwrap_or(80) as u16;
+                            let rows = control["rows"].as_u64().unwrap_or(24) as u16;
+                            if hub.resize(id, cols, rows).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Ping(payload))) => {
+                        if socket.send(Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) => break,
+                }
+            }
+            output = hub.read(id) => {
+                match output {
+                    Ok(Some(bytes)) => {
+                        if socket.send(Message::Binary(bytes.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) | Err(_) => break,
+                }
+            }
+        }
+    }
+    let _ = hub.detach(id).await;
+}
+
 async fn push_workspace_events(
     mut socket: WebSocket,
     workspace_id: herdr_workbench_domain::WorkbenchWorkspaceId,
@@ -1006,6 +1077,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn herdr_websocket_requires_pairing_code_off_loopback() {
+        let app = empty_router();
+        let enabled = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/lan/enable")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(enabled.status(), StatusCode::OK);
+        let denied = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ws/v1/herdr")
+                    .header("x-forwarded-for", "10.0.0.8")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

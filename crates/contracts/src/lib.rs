@@ -274,7 +274,7 @@ pub struct ErrorBody {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(health, lan_status, enable_lan, disable_lan, list_workspaces, get_workspace_state, open_preview, capture_preview_screenshot, get_preview_screenshot, get_preview_diagnostics, send_preview_context, list_workspace_agents, get_workspace_agent, prompt_workspace_agent, approve_workspace_agent, workspace_events),
+    paths(health, lan_status, enable_lan, disable_lan, list_workspaces, get_workspace_state, open_preview, capture_preview_screenshot, get_preview_screenshot, get_preview_diagnostics, send_preview_context, list_workspace_agents, get_workspace_agent, prompt_workspace_agent, approve_workspace_agent, workspace_events, herdr_client),
     components(schemas(
         HealthResponse, LanStatusResponse, WorkspaceDto, WorkspaceListResponse, PreviewOpenRequest,
         PreviewContextSendRequest, PreviewContextSendResponse,
@@ -390,3 +390,10 @@ pub fn approve_workspace_agent() {}
     responses((status = 101), (status = 404, body = ErrorResponse))
 )]
 pub fn workspace_events() {}
+
+#[utoipa::path(
+    get,
+    path = "/ws/v1/herdr",
+    responses((status = 101), (status = 403, body = ErrorResponse))
+)]
+pub fn herdr_client() {}

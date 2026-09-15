@@ -51,6 +51,103 @@ pub trait HerdrAgentBridge: Send + Sync {
 pub struct UnavailableAgentBridge;
 
 #[async_trait]
+pub trait HerdrClientSession: Send + Sync {
+    async fn write(&self, bytes: &[u8]) -> Result<(), HerdrHostError>;
+    async fn resize(&self, cols: u16, rows: u16) -> Result<(), HerdrHostError>;
+    async fn read(&self) -> Result<Option<Vec<u8>>, HerdrHostError>;
+    async fn close(&self) -> Result<(), HerdrHostError>;
+}
+
+#[async_trait]
+pub trait HerdrClientFactory: Send + Sync {
+    async fn attach(
+        &self,
+        cols: u16,
+        rows: u16,
+    ) -> Result<Arc<dyn HerdrClientSession>, HerdrHostError>;
+}
+
+#[derive(Debug, Default)]
+pub struct UnavailableHerdrClientFactory;
+
+#[async_trait]
+impl HerdrClientFactory for UnavailableHerdrClientFactory {
+    async fn attach(&self, _: u16, _: u16) -> Result<Arc<dyn HerdrClientSession>, HerdrHostError> {
+        Err(HerdrHostError::unavailable(
+            "Herdr client factory is not configured",
+        ))
+    }
+}
+
+pub struct HerdrClientHub {
+    factory: Arc<dyn HerdrClientFactory>,
+    sessions: std::sync::Mutex<HashMap<uuid::Uuid, Arc<dyn HerdrClientSession>>>,
+}
+
+impl HerdrClientHub {
+    pub fn new(factory: Arc<dyn HerdrClientFactory>) -> Self {
+        Self {
+            factory,
+            sessions: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn unavailable() -> Self {
+        Self::new(Arc::new(UnavailableHerdrClientFactory))
+    }
+
+    pub fn active_count(&self) -> usize {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .len()
+    }
+
+    pub async fn attach(&self, cols: u16, rows: u16) -> Result<uuid::Uuid, HerdrHostError> {
+        let session = self.factory.attach(cols, rows).await?;
+        let id = uuid::Uuid::now_v7();
+        self.sessions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(id, session);
+        Ok(id)
+    }
+
+    pub async fn write(&self, id: uuid::Uuid, bytes: &[u8]) -> Result<(), HerdrHostError> {
+        self.session(id)?.write(bytes).await
+    }
+
+    pub async fn resize(&self, id: uuid::Uuid, cols: u16, rows: u16) -> Result<(), HerdrHostError> {
+        self.session(id)?.resize(cols, rows).await
+    }
+
+    pub async fn read(&self, id: uuid::Uuid) -> Result<Option<Vec<u8>>, HerdrHostError> {
+        self.session(id)?.read().await
+    }
+
+    pub async fn detach(&self, id: uuid::Uuid) -> Result<(), HerdrHostError> {
+        let session = self
+            .sessions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&id);
+        if let Some(session) = session {
+            session.close().await?;
+        }
+        Ok(())
+    }
+
+    fn session(&self, id: uuid::Uuid) -> Result<Arc<dyn HerdrClientSession>, HerdrHostError> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| HerdrHostError::unavailable("herdr client session is not attached"))
+    }
+}
+
+#[async_trait]
 impl HerdrAgentBridge for UnavailableAgentBridge {
     async fn list_agents(&self) -> Result<Vec<HerdrAgentInfo>, HerdrHostError> {
         Ok(Vec::new())
@@ -1358,11 +1455,11 @@ mod tests {
     use super::{
         AgentDecision, ApproveWorkspaceAgent, BindWorkspace, CapturePreview, CapturedPreviewImage,
         EventBus, HERDR_RECONCILE_BACKOFF_INTERVAL, HERDR_RECONCILE_OK_INTERVAL, HerdrAgentBridge,
-        HerdrAgentInfo, HerdrEventSource, HerdrEventSyncLoop, HerdrHost, HerdrHostError,
-        HerdrLifecycleEvent, HerdrPaneInfo, HerdrReconcileLoop, HerdrWorkspaceContext,
-        HerdrWorkspaceInfo, InMemoryPreviewDiagnostics, InMemoryPreviewRepository,
-        InMemoryScreenshotStore, InMemoryWorkspaceRepository, LanAccess, ListWorkspaceAgents,
-        OpenPreview, PreviewAdapter, PreviewDiagnosticsSink, PreviewError,
+        HerdrAgentInfo, HerdrClientFactory, HerdrClientHub, HerdrClientSession, HerdrEventSource,
+        HerdrEventSyncLoop, HerdrHost, HerdrHostError, HerdrLifecycleEvent, HerdrPaneInfo,
+        HerdrReconcileLoop, HerdrWorkspaceContext, HerdrWorkspaceInfo, InMemoryPreviewDiagnostics,
+        InMemoryPreviewRepository, InMemoryScreenshotStore, InMemoryWorkspaceRepository, LanAccess,
+        ListWorkspaceAgents, OpenPreview, PreviewAdapter, PreviewDiagnosticsSink, PreviewError,
         PreviewScreenshotRepository, PreviewStateUpdater, PromptWorkspaceAgent,
         PublishingPreviewStateUpdater, ReadWorkspaceAgent, ReconcileSleeper, ScreenshotStore,
         SendPreviewContext, SyncHerdrWorkspaces, WorkspaceRepository,
@@ -2672,5 +2769,89 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("blocked"));
         assert!(keys.lock().unwrap().is_empty());
+    }
+
+    struct FakeClientSession {
+        writes: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+        resizes: Arc<std::sync::Mutex<Vec<(u16, u16)>>>,
+        closed: Arc<std::sync::Mutex<bool>>,
+    }
+
+    #[async_trait]
+    impl HerdrClientSession for FakeClientSession {
+        async fn write(&self, bytes: &[u8]) -> Result<(), HerdrHostError> {
+            self.writes.lock().unwrap().push(bytes.to_vec());
+            Ok(())
+        }
+
+        async fn resize(&self, cols: u16, rows: u16) -> Result<(), HerdrHostError> {
+            self.resizes.lock().unwrap().push((cols, rows));
+            Ok(())
+        }
+
+        async fn read(&self) -> Result<Option<Vec<u8>>, HerdrHostError> {
+            Ok(None)
+        }
+
+        async fn close(&self) -> Result<(), HerdrHostError> {
+            *self.closed.lock().unwrap() = true;
+            Ok(())
+        }
+    }
+
+    struct FakeClientFactory {
+        attached: Arc<std::sync::Mutex<Vec<(u16, u16)>>>,
+        closed: Arc<std::sync::Mutex<Vec<Arc<std::sync::Mutex<bool>>>>>,
+    }
+
+    #[async_trait]
+    impl HerdrClientFactory for FakeClientFactory {
+        async fn attach(
+            &self,
+            cols: u16,
+            rows: u16,
+        ) -> Result<Arc<dyn HerdrClientSession>, HerdrHostError> {
+            self.attached.lock().unwrap().push((cols, rows));
+            let closed = Arc::new(std::sync::Mutex::new(false));
+            self.closed.lock().unwrap().push(Arc::clone(&closed));
+            Ok(Arc::new(FakeClientSession {
+                writes: Arc::new(std::sync::Mutex::new(Vec::new())),
+                resizes: Arc::new(std::sync::Mutex::new(Vec::new())),
+                closed,
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn herdr_client_hub_gives_each_attach_its_own_session() {
+        let attached = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let closed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let hub = HerdrClientHub::new(Arc::new(FakeClientFactory {
+            attached: Arc::clone(&attached),
+            closed: Arc::clone(&closed),
+        }));
+        let first = hub.attach(120, 40).await.unwrap();
+        let second = hub.attach(40, 20).await.unwrap();
+        assert_ne!(first, second);
+        assert_eq!(hub.active_count(), 2);
+        assert_eq!(*attached.lock().unwrap(), vec![(120, 40), (40, 20)]);
+        hub.detach(first).await.unwrap();
+        assert_eq!(hub.active_count(), 1);
+        assert!(*closed.lock().unwrap()[0].lock().unwrap());
+        assert!(!*closed.lock().unwrap()[1].lock().unwrap());
+        hub.detach(second).await.unwrap();
+        assert_eq!(hub.active_count(), 0);
+        assert!(*closed.lock().unwrap()[1].lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn detaching_a_herdr_client_does_not_stop_the_server() {
+        let hub = HerdrClientHub::new(Arc::new(FakeClientFactory {
+            attached: Arc::new(std::sync::Mutex::new(Vec::new())),
+            closed: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }));
+        let id = hub.attach(80, 24).await.unwrap();
+        hub.detach(id).await.unwrap();
+        assert_eq!(hub.active_count(), 0);
     }
 }

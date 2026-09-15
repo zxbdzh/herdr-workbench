@@ -132,7 +132,7 @@ flowchart LR
 - Workspace 文件系统：源码、配置和资源的唯一事实来源。
 - SQLite 状态表：Workbench 当前可查询状态。
 - Durable Event Journal：重要状态变化、审计和 revision 同步记录。
-- Rust 内存：WebView2、连接和临时运行态。
+- Rust 内存：WebView2、连接、每路 ConPTY + `herdr` 客户端，以及临时运行态。高频终端字节走 `/ws/v1/herdr`，不写 SQLite。
 - Tokio `broadcast`：进程内实时传播，不负责补发历史。
 - WebSocket：对外实时通知，断线后通过 Query 恢复。
 

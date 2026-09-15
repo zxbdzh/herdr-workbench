@@ -1,11 +1,13 @@
 use std::{env, fs, net::SocketAddr, path::PathBuf, sync::Arc};
 
-use herdr_workbench_adapters_herdr::{HerdrCliHost, HerdrNamedPipeEventSource};
+use herdr_workbench_adapters_herdr::{
+    HerdrCliHost, HerdrNamedPipeEventSource, PtyHerdrClientFactory,
+};
 use herdr_workbench_adapters_sqlite::{FilesystemScreenshotStore, SqliteWorkspaceRepository};
 use herdr_workbench_app_core::{
-    EventBus, EventPublisher, HerdrEventSyncLoop, HerdrReconcileLoop, InMemoryPreviewDiagnostics,
-    PreviewAdapter, PreviewDiagnosticsSink, SyncHerdrWorkspaces, TokioReconcileSleeper,
-    WorkspaceRepository,
+    EventBus, EventPublisher, HerdrClientHub, HerdrEventSyncLoop, HerdrReconcileLoop,
+    InMemoryPreviewDiagnostics, PreviewAdapter, PreviewDiagnosticsSink, SyncHerdrWorkspaces,
+    TokioReconcileSleeper, WorkspaceRepository,
 };
 use herdr_workbench_transport::{AppState, router};
 use thiserror::Error;
@@ -163,6 +165,9 @@ where
         diagnostics,
         Arc::new(HerdrCliHost::from_env()),
     );
+    state.herdr_clients = Arc::new(HerdrClientHub::new(Arc::new(
+        PtyHerdrClientFactory::from_env(),
+    )));
     state.lan_bind = Some(lan_tx);
     let mut announced = false;
     loop {

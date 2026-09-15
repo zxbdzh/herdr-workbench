@@ -12,6 +12,8 @@
     "@vitejs/plugin-react": "latest",
     "@types/react": "latest",
     "@types/react-dom": "latest",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
     "react": "latest",
     "react-dom": "latest",
     "vite": "latest",
