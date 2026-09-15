@@ -38,7 +38,7 @@ v0.4 先交付映射出去的 Herdr。内嵌浏览器和文件浏览还没做。
 
 需要：Windows 10/11、本机已安装 [Herdr](https://herdr.dev)。
 
-1. 打开 [Releases](https://github.com/zxbdzh/herdr-workbench/releases) 下载 `Herdr Workbench_0.4.2_x64-setup.exe`
+1. 打开 [Releases](https://github.com/zxbdzh/herdr-workbench/releases) 下载 `Herdr Workbench_0.4.3_x64-setup.exe`
 2. 安装并启动
 3. 打开就是 Herdr。没有 server 时，第一份客户端会把它拉起来
 4. 要给手机或另一台电脑用：在本机点「开启局域网」，记下配对码，另一台设备打开 `http://<局域网IP>:17321/`，输入配对码
