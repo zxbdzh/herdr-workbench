@@ -79,9 +79,22 @@ impl HerdrClientFactory for UnavailableHerdrClientFactory {
     }
 }
 
+pub fn herdr_client_attach_size(cols: Option<u16>, rows: Option<u16>) -> (u16, u16) {
+    (
+        cols.unwrap_or(80).clamp(20, 400),
+        rows.unwrap_or(24).clamp(8, 200),
+    )
+}
+
+struct AttachedClient {
+    session: Arc<dyn HerdrClientSession>,
+    cols: u16,
+    rows: u16,
+}
+
 pub struct HerdrClientHub {
     factory: Arc<dyn HerdrClientFactory>,
-    sessions: std::sync::Mutex<HashMap<uuid::Uuid, Arc<dyn HerdrClientSession>>>,
+    sessions: std::sync::Mutex<HashMap<uuid::Uuid, AttachedClient>>,
 }
 
 impl HerdrClientHub {
@@ -109,7 +122,14 @@ impl HerdrClientHub {
         self.sessions
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .insert(id, session);
+            .insert(
+                id,
+                AttachedClient {
+                    session,
+                    cols,
+                    rows,
+                },
+            );
         Ok(id)
     }
 
@@ -118,7 +138,22 @@ impl HerdrClientHub {
     }
 
     pub async fn resize(&self, id: uuid::Uuid, cols: u16, rows: u16) -> Result<(), HerdrHostError> {
-        self.session(id)?.resize(cols, rows).await
+        let session = {
+            let mut sessions = self
+                .sessions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let attached = sessions.get_mut(&id).ok_or_else(|| {
+                HerdrHostError::unavailable("herdr client session is not attached")
+            })?;
+            if attached.cols == cols && attached.rows == rows {
+                return Ok(());
+            }
+            attached.cols = cols;
+            attached.rows = rows;
+            Arc::clone(&attached.session)
+        };
+        session.resize(cols, rows).await
     }
 
     pub async fn read(&self, id: uuid::Uuid) -> Result<Option<Vec<u8>>, HerdrHostError> {
@@ -131,8 +166,8 @@ impl HerdrClientHub {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .remove(&id);
-        if let Some(session) = session {
-            session.close().await?;
+        if let Some(attached) = session {
+            attached.session.close().await?;
         }
         Ok(())
     }
@@ -142,7 +177,7 @@ impl HerdrClientHub {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .get(&id)
-            .cloned()
+            .map(|attached| Arc::clone(&attached.session))
             .ok_or_else(|| HerdrHostError::unavailable("herdr client session is not attached"))
     }
 }
@@ -1462,7 +1497,7 @@ mod tests {
         ListWorkspaceAgents, OpenPreview, PreviewAdapter, PreviewDiagnosticsSink, PreviewError,
         PreviewScreenshotRepository, PreviewStateUpdater, PromptWorkspaceAgent,
         PublishingPreviewStateUpdater, ReadWorkspaceAgent, ReconcileSleeper, ScreenshotStore,
-        SendPreviewContext, SyncHerdrWorkspaces, WorkspaceRepository,
+        SendPreviewContext, SyncHerdrWorkspaces, WorkspaceRepository, herdr_client_attach_size,
     };
     use async_trait::async_trait;
     use herdr_workbench_domain::{
@@ -2802,6 +2837,7 @@ mod tests {
     struct FakeClientFactory {
         attached: Arc<std::sync::Mutex<Vec<(u16, u16)>>>,
         closed: Arc<std::sync::Mutex<Vec<Arc<std::sync::Mutex<bool>>>>>,
+        resizes: Arc<std::sync::Mutex<Vec<(u16, u16)>>>,
     }
 
     #[async_trait]
@@ -2816,10 +2852,20 @@ mod tests {
             self.closed.lock().unwrap().push(Arc::clone(&closed));
             Ok(Arc::new(FakeClientSession {
                 writes: Arc::new(std::sync::Mutex::new(Vec::new())),
-                resizes: Arc::new(std::sync::Mutex::new(Vec::new())),
+                resizes: Arc::clone(&self.resizes),
                 closed,
             }))
         }
+    }
+
+    fn empty_resizes() -> Arc<std::sync::Mutex<Vec<(u16, u16)>>> {
+        Arc::new(std::sync::Mutex::new(Vec::new()))
+    }
+
+    #[test]
+    fn herdr_client_attach_size_uses_the_fitted_client_not_80x24() {
+        assert_eq!(herdr_client_attach_size(Some(180), Some(50)), (180, 50));
+        assert_eq!(herdr_client_attach_size(None, None), (80, 24));
     }
 
     #[tokio::test]
@@ -2829,6 +2875,7 @@ mod tests {
         let hub = HerdrClientHub::new(Arc::new(FakeClientFactory {
             attached: Arc::clone(&attached),
             closed: Arc::clone(&closed),
+            resizes: empty_resizes(),
         }));
         let first = hub.attach(120, 40).await.unwrap();
         let second = hub.attach(40, 20).await.unwrap();
@@ -2849,9 +2896,25 @@ mod tests {
         let hub = HerdrClientHub::new(Arc::new(FakeClientFactory {
             attached: Arc::new(std::sync::Mutex::new(Vec::new())),
             closed: Arc::new(std::sync::Mutex::new(Vec::new())),
+            resizes: empty_resizes(),
         }));
         let id = hub.attach(80, 24).await.unwrap();
         hub.detach(id).await.unwrap();
         assert_eq!(hub.active_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn herdr_client_hub_ignores_a_resize_that_matches_the_attach_size() {
+        let resizes = empty_resizes();
+        let hub = HerdrClientHub::new(Arc::new(FakeClientFactory {
+            attached: Arc::new(std::sync::Mutex::new(Vec::new())),
+            closed: Arc::new(std::sync::Mutex::new(Vec::new())),
+            resizes: Arc::clone(&resizes),
+        }));
+        let id = hub.attach(180, 50).await.unwrap();
+        hub.resize(id, 180, 50).await.unwrap();
+        assert!(resizes.lock().unwrap().is_empty());
+        hub.resize(id, 200, 60).await.unwrap();
+        assert_eq!(*resizes.lock().unwrap(), vec![(200, 60)]);
     }
 }

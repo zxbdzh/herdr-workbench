@@ -19,17 +19,22 @@ export const withPair = (path: string) => {
   return `${path}${path.includes("?") ? "&" : "?"}pair=${encodeURIComponent(pair)}`;
 };
 
-export const herdrSocketUrl = () => {
+export const herdrSocketUrl = (cols?: number, rows?: number) => {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return withPair(`${protocol}//${window.location.host}/ws/v1/herdr`);
+  let url = withPair(`${protocol}//${window.location.host}/ws/v1/herdr`);
+  if (cols && rows) {
+    url += `${url.includes("?") ? "&" : "?"}cols=${cols}&rows=${rows}`;
+  }
+  return url;
 };
 
 export const isTouch = () => window.matchMedia("(pointer: coarse)").matches;
 
 export const createHerdrTerminal = (host: HTMLElement) => {
   const terminal = new Terminal({
-    cursorBlink: true,
+    cursorBlink: false,
     convertEol: false,
+    windowsMode: true,
     fontFamily: "Consolas, 'Cascadia Mono', monospace",
     fontSize: 14,
     theme: { background: "#080b10", foreground: "#e6edf3", cursor: "#55d68a" },
@@ -70,21 +75,32 @@ export const attachHerdrSocket = (
   let lastTouch: { x: number; y: number } | null = null;
   let twoFingerOrigin: { y: number } | null = null;
 
+  let lastCols = 0;
+  let lastRows = 0;
+  let resizeTimer: number | undefined;
+
   const sendResize = () => {
     fit.fit();
+    const cols = terminal.cols;
+    const rows = terminal.rows;
+    if (cols === lastCols && rows === lastRows) return;
+    lastCols = cols;
+    lastRows = rows;
     if (socket?.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: "resize", cols: terminal.cols, rows: terminal.rows }));
+      socket.send(JSON.stringify({ type: "resize", cols, rows }));
     }
   };
 
   const connect = () => {
     if (closed) return;
     onStatus("connecting");
-    socket = new WebSocket(herdrSocketUrl());
+    fit.fit();
+    lastCols = terminal.cols;
+    lastRows = terminal.rows;
+    socket = new WebSocket(herdrSocketUrl(terminal.cols, terminal.rows));
     socket.binaryType = "arraybuffer";
     socket.onopen = () => {
       onStatus("open");
-      sendResize();
     };
     socket.onmessage = (event) => {
       if (typeof event.data === "string") return;
@@ -188,7 +204,10 @@ export const attachHerdrSocket = (
   host.addEventListener("touchend", onTouchEnd);
   host.addEventListener("touchcancel", onTouchEnd);
 
-  const observer = new ResizeObserver(() => sendResize());
+  const observer = new ResizeObserver(() => {
+    if (resizeTimer) window.clearTimeout(resizeTimer);
+    resizeTimer = window.setTimeout(sendResize, 80);
+  });
   observer.observe(host);
   connect();
 
@@ -207,6 +226,7 @@ export const attachHerdrSocket = (
     dispose: () => {
       closed = true;
       observer.disconnect();
+      if (resizeTimer) window.clearTimeout(resizeTimer);
       if (longPress) window.clearTimeout(longPress);
       textarea?.removeEventListener("compositionstart", onCompositionStart);
       textarea?.removeEventListener("compositionend", onCompositionEnd);
