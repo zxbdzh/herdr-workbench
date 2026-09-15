@@ -30,6 +30,11 @@ export const herdrSocketUrl = (cols?: number, rows?: number) => {
 
 export const isTouch = () => window.matchMedia("(pointer: coarse)").matches;
 
+export const HERDR_MOBILE_WIDTH_THRESHOLD = 64;
+
+export const mappedClientCols = (fittedCols: number, touch: boolean) =>
+  touch ? Math.min(fittedCols, HERDR_MOBILE_WIDTH_THRESHOLD) : fittedCols;
+
 export const createHerdrTerminal = (host: HTMLElement) => {
   const terminal = new Terminal({
     cursorBlink: false,
@@ -82,10 +87,16 @@ export const attachHerdrSocket = (
   let lastRows = 0;
   let resizeTimer: number | undefined;
 
-  const sendResize = () => {
+  const applyMappedSize = () => {
     fit.fit();
-    const cols = terminal.cols;
+    const cols = mappedClientCols(terminal.cols, isTouch());
     const rows = terminal.rows;
+    if (terminal.cols !== cols) terminal.resize(cols, rows);
+    return { cols: terminal.cols, rows: terminal.rows };
+  };
+
+  const sendResize = () => {
+    const { cols, rows } = applyMappedSize();
     if (cols === lastCols && rows === lastRows) return;
     lastCols = cols;
     lastRows = rows;
@@ -97,10 +108,10 @@ export const attachHerdrSocket = (
   const connect = () => {
     if (closed) return;
     onStatus("connecting");
-    fit.fit();
-    lastCols = terminal.cols;
-    lastRows = terminal.rows;
-    socket = new WebSocket(herdrSocketUrl(terminal.cols, terminal.rows));
+    const { cols, rows } = applyMappedSize();
+    lastCols = cols;
+    lastRows = rows;
+    socket = new WebSocket(herdrSocketUrl(cols, rows));
     socket.binaryType = "arraybuffer";
     socket.onopen = () => {
       onStatus("open");
