@@ -55,14 +55,41 @@ export const createHerdrTerminal = (host: HTMLElement) => {
   return { terminal, fit };
 };
 
-const sendMouse = (target: EventTarget, type: string, button: number, clientX: number, clientY: number) => {
+const pointerTarget = (host: HTMLElement, event: Event) =>
+  (event.target instanceof Element
+    ? event.target.closest(".xterm-screen")
+    : null) ??
+  host.querySelector(".xterm-screen") ??
+  host;
+
+const sendMouse = (
+  target: EventTarget,
+  type: string,
+  button: number,
+  clientX: number,
+  clientY: number,
+) => {
   target.dispatchEvent(
     new MouseEvent(type, {
       bubbles: true,
       cancelable: true,
       view: window,
       button,
-      buttons: button === 0 ? 1 : button === 2 ? 2 : 0,
+      buttons: type === "mouseup" ? 0 : button === 0 ? 1 : button === 2 ? 2 : 0,
+      clientX,
+      clientY,
+    }),
+  );
+};
+
+const sendWheel = (target: EventTarget, deltaY: number, clientX: number, clientY: number) => {
+  target.dispatchEvent(
+    new WheelEvent("wheel", {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      deltaY,
+      deltaMode: WheelEvent.DOM_DELTA_PIXEL,
       clientX,
       clientY,
     }),
@@ -164,12 +191,15 @@ export const attachHerdrSocket = (
   host.addEventListener("contextmenu", onContextMenu);
 
   const onTouchStart = (event: TouchEvent) => {
+    event.preventDefault();
+    const screen = pointerTarget(host, event);
     if (event.touches.length === 1) {
       const touch = event.touches[0];
       lastTouch = { x: touch.clientX, y: touch.clientY };
       longPress = window.setTimeout(() => {
-        sendMouse(event.target ?? host, "mousedown", 2, touch.clientX, touch.clientY);
-        sendMouse(event.target ?? host, "mouseup", 2, touch.clientX, touch.clientY);
+        sendMouse(screen, "mousedown", 2, touch.clientX, touch.clientY);
+        sendMouse(screen, "mouseup", 2, touch.clientX, touch.clientY);
+        sendMouse(screen, "contextmenu", 2, touch.clientX, touch.clientY);
         longPress = undefined;
       }, 480);
     } else {
@@ -183,6 +213,7 @@ export const attachHerdrSocket = (
   };
   const onTouchMove = (event: TouchEvent) => {
     event.preventDefault();
+    const screen = pointerTarget(host, event);
     if (event.touches.length === 1 && lastTouch) {
       const touch = event.touches[0];
       if (Math.hypot(touch.clientX - lastTouch.x, touch.clientY - lastTouch.y) > 8 && longPress) {
@@ -193,16 +224,8 @@ export const attachHerdrSocket = (
     if (event.touches.length === 2 && twoFingerOrigin) {
       const y = (event.touches[0].clientY + event.touches[1].clientY) / 2;
       const delta = twoFingerOrigin.y - y;
-      if (Math.abs(delta) > 12) {
-        host.dispatchEvent(
-          new WheelEvent("wheel", {
-            bubbles: true,
-            cancelable: true,
-            deltaY: delta,
-            clientX: event.touches[0].clientX,
-            clientY: event.touches[0].clientY,
-          }),
-        );
+      if (Math.abs(delta) > 8) {
+        sendWheel(screen, delta * 4, event.touches[0].clientX, event.touches[0].clientY);
         twoFingerOrigin = { y };
       }
     }
