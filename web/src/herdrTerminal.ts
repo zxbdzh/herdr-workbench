@@ -109,6 +109,7 @@ export const attachHerdrSocket = (
   let longPress: number | undefined;
   let lastTouch: { x: number; y: number } | null = null;
   let twoFingerOrigin: { y: number } | null = null;
+  let swallowLift = false;
 
   let lastCols = 0;
   let lastRows = 0;
@@ -200,6 +201,7 @@ export const attachHerdrSocket = (
         sendMouse(screen, "mousedown", 2, touch.clientX, touch.clientY);
         sendMouse(screen, "mouseup", 2, touch.clientX, touch.clientY);
         sendMouse(screen, "contextmenu", 2, touch.clientX, touch.clientY);
+        swallowLift = true;
         longPress = undefined;
       }, 480);
     } else {
@@ -230,9 +232,25 @@ export const attachHerdrSocket = (
       }
     }
   };
-  const onTouchEnd = () => {
+  const onTouchEnd = (event: TouchEvent) => {
+    const screen = pointerTarget(host, event);
+    const ended = event.changedTouches[0];
+    const tap =
+      event.touches.length === 0 &&
+      ended &&
+      lastTouch &&
+      !twoFingerOrigin &&
+      Math.hypot(ended.clientX - lastTouch.x, ended.clientY - lastTouch.y) <= 8;
     if (longPress) window.clearTimeout(longPress);
     longPress = undefined;
+    if (tap) {
+      if (swallowLift) {
+        swallowLift = false;
+      } else {
+        sendMouse(screen, "mousedown", 0, ended.clientX, ended.clientY);
+        sendMouse(screen, "mouseup", 0, ended.clientX, ended.clientY);
+      }
+    }
     lastTouch = null;
     twoFingerOrigin = null;
   };
