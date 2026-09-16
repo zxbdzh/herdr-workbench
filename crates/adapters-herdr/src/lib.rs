@@ -693,6 +693,8 @@ mod tests {
     #[test]
     fn herdr_client_attach_runs_herdr_with_no_extra_args() {
         assert!(herdr_client_attach_args().is_empty());
+        assert!(!herdr_client_attach_args().iter().any(|arg| arg == "stop"));
+        assert!(!herdr_client_attach_args().iter().any(|arg| arg == "server"));
     }
 
     #[test]

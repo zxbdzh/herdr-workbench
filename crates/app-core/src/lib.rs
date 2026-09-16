@@ -2838,6 +2838,7 @@ mod tests {
         attached: Arc<std::sync::Mutex<Vec<(u16, u16)>>>,
         closed: Arc<std::sync::Mutex<Vec<Arc<std::sync::Mutex<bool>>>>>,
         resizes: Arc<std::sync::Mutex<Vec<(u16, u16)>>>,
+        stopped: Arc<std::sync::Mutex<u32>>,
     }
 
     #[async_trait]
@@ -2847,6 +2848,11 @@ mod tests {
             cols: u16,
             rows: u16,
         ) -> Result<Arc<dyn HerdrClientSession>, HerdrHostError> {
+            assert_eq!(
+                *self.stopped.lock().unwrap(),
+                0,
+                "attaching a mapped client must not stop the Herdr server"
+            );
             self.attached.lock().unwrap().push((cols, rows));
             let closed = Arc::new(std::sync::Mutex::new(false));
             self.closed.lock().unwrap().push(Arc::clone(&closed));
@@ -2860,6 +2866,10 @@ mod tests {
 
     fn empty_resizes() -> Arc<std::sync::Mutex<Vec<(u16, u16)>>> {
         Arc::new(std::sync::Mutex::new(Vec::new()))
+    }
+
+    fn empty_stops() -> Arc<std::sync::Mutex<u32>> {
+        Arc::new(std::sync::Mutex::new(0))
     }
 
     #[test]
@@ -2876,6 +2886,7 @@ mod tests {
             attached: Arc::clone(&attached),
             closed: Arc::clone(&closed),
             resizes: empty_resizes(),
+            stopped: empty_stops(),
         }));
         let first = hub.attach(120, 40).await.unwrap();
         let second = hub.attach(40, 20).await.unwrap();
@@ -2893,14 +2904,17 @@ mod tests {
 
     #[tokio::test]
     async fn detaching_a_herdr_client_does_not_stop_the_server() {
+        let stopped = empty_stops();
         let hub = HerdrClientHub::new(Arc::new(FakeClientFactory {
             attached: Arc::new(std::sync::Mutex::new(Vec::new())),
             closed: Arc::new(std::sync::Mutex::new(Vec::new())),
             resizes: empty_resizes(),
+            stopped: Arc::clone(&stopped),
         }));
         let id = hub.attach(80, 24).await.unwrap();
         hub.detach(id).await.unwrap();
         assert_eq!(hub.active_count(), 0);
+        assert_eq!(*stopped.lock().unwrap(), 0);
     }
 
     #[tokio::test]
@@ -2910,6 +2924,7 @@ mod tests {
             attached: Arc::new(std::sync::Mutex::new(Vec::new())),
             closed: Arc::new(std::sync::Mutex::new(Vec::new())),
             resizes: Arc::clone(&resizes),
+            stopped: empty_stops(),
         }));
         let id = hub.attach(180, 50).await.unwrap();
         hub.resize(id, 180, 50).await.unwrap();
